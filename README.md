@@ -13,6 +13,7 @@ Current feature set:
 - promote extra repositories into a run as writable worktrees
 - push each run worktree to its own run branch
 - purge finished run workspaces
+- run a local end-to-end integration smoke test with `npm run integration-test`
 
 ## Install
 

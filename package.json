@@ -13,7 +13,8 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "test": "vitest run"
+    "test": "vitest run",
+    "integration-test": "npm run build && vitest run tests/integration.test.ts"
   },
   "dependencies": {
     "commander": "^14.0.3"
