@@ -31,6 +31,24 @@ function tryGit(repoPath: string, args: string[]): string {
   return result.stdout;
 }
 
+function preferredDefaultRef(worktreePath: string, defaultBranch: string): string {
+  const fetch = runGitRaw(worktreePath, ['fetch', 'origin']);
+  if (fetch.status === 0) {
+    const remoteRef = `origin/${defaultBranch}`;
+    const hasRemoteBranch = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', remoteRef]);
+    if (hasRemoteBranch.status === 0) {
+      return remoteRef;
+    }
+  }
+
+  const hasLocalBranch = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', defaultBranch]);
+  if (hasLocalBranch.status === 0) {
+    return defaultBranch;
+  }
+
+  return 'HEAD';
+}
+
 export function assertGitRepo(repoPath: string): void {
   if (!existsSync(join(repoPath, '.git'))) {
     throw new Error(`Not a git repository: ${repoPath}`);
@@ -67,27 +85,35 @@ export function gitWorktreeAdd(repoPath: string, worktreePath: string, branchNam
   runGit(repoPath, ['worktree', 'add', '-B', branchName, worktreePath, 'HEAD']);
 }
 
-export function gitSyncWorktreeToBranch(worktreePath: string, defaultBranch: string): void {
-  const fetch = runGitRaw(worktreePath, ['fetch', 'origin']);
-  if (fetch.status === 0) {
-    const remoteRef = `origin/${defaultBranch}`;
-    const hasRemoteBranch = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', remoteRef]);
-    if (hasRemoteBranch.status === 0) {
-      runGit(worktreePath, ['reset', '--hard', remoteRef]);
-      runGit(worktreePath, ['branch', '--set-upstream-to', remoteRef]);
-    } else {
-      runGit(worktreePath, ['reset', '--hard', defaultBranch]);
-    }
-    runGit(worktreePath, ['clean', '-fd']);
-    return;
-  }
+export function gitWorktreeAddDetached(repoPath: string, worktreePath: string): void {
+  runGit(repoPath, ['worktree', 'add', '--detach', worktreePath, 'HEAD']);
+}
 
-  runGit(worktreePath, ['reset', '--hard', defaultBranch]);
-  runGit(worktreePath, ['clean', '-fd']);
+export function gitPrepareWorktreeForRun(worktreePath: string, branchName: string, defaultBranch: string): void {
+  const targetRef = preferredDefaultRef(worktreePath, defaultBranch);
+  runGit(worktreePath, ['checkout', '--detach', targetRef]);
+  runGit(worktreePath, ['reset', '--hard', targetRef]);
+  runGit(worktreePath, ['clean', '-fdx']);
+  runGit(worktreePath, ['checkout', '-B', branchName]);
+}
+
+export function gitResetWorktreeToDefault(worktreePath: string, defaultBranch: string): void {
+  const targetRef = preferredDefaultRef(worktreePath, defaultBranch);
+  runGit(worktreePath, ['checkout', '--detach', targetRef]);
+  runGit(worktreePath, ['reset', '--hard', targetRef]);
+  runGit(worktreePath, ['clean', '-fdx']);
 }
 
 export function gitHasUncommittedChanges(worktreePath: string): boolean {
   const result = runGitRaw(worktreePath, ['status', '--porcelain']);
+  if (result.status !== 0) {
+    throw new Error(result.stderr || `git status failed in ${worktreePath}`);
+  }
+  return result.stdout.length > 0;
+}
+
+export function gitHasAnyChanges(worktreePath: string): boolean {
+  const result = runGitRaw(worktreePath, ['status', '--porcelain', '--ignored']);
   if (result.status !== 0) {
     throw new Error(result.stderr || `git status failed in ${worktreePath}`);
   }

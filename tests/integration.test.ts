@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +40,7 @@ function runCli(args: string[], cwd = tempDir): string {
 }
 
 describe('integration-test CLI flow', () => {
-  it('runs register -> add -> new-tree -> push-tree against a local bare remote', () => {
+  it('runs register -> add -> new-tree -> push-tree and then reuses the pooled worktree after purge', () => {
     const barePath = join(tempDir, 'origin.git');
     const seedRepo = join(tempDir, 'seed');
     const verifyMain = join(tempDir, 'verify-main');
@@ -68,8 +68,11 @@ describe('integration-test CLI flow', () => {
       worktrees: Array<{ worktreePath: string; branchName: string }>;
     };
     expect(runJson.worktrees).toHaveLength(1);
+    expect(runJson.worktrees[0]!.worktreePath).toBe(join(runJson.run.workspaceRoot, 'repos', 'main'));
+    expect(lstatSync(runJson.worktrees[0]!.worktreePath).isSymbolicLink()).toBe(true);
 
     const worktreePath = runJson.worktrees[0]!.worktreePath;
+    const firstPoolPath = realpathSync(worktreePath);
     const branchName = runJson.worktrees[0]!.branchName;
     writeFile(join(worktreePath, 'note.txt'), 'hello from integration test\n');
     run('git', ['config', 'user.name', 'Integration Tests'], worktreePath);
@@ -91,5 +94,22 @@ describe('integration-test CLI flow', () => {
     run('git', ['clone', '--branch', branchName, barePath, verifyRun], tempDir);
     expect(existsSync(join(verifyRun, 'note.txt'))).toBe(true);
     expect(readFileSync(join(verifyRun, 'note.txt'), 'utf-8')).toContain('integration test');
+
+    const purgeJson = JSON.parse(runCli(['purge-tree', 'demo', '--force', '--json'])) as {
+      purgedRunIds: string[];
+      skippedRunIds: string[];
+    };
+    expect(purgeJson.purgedRunIds).toEqual([runJson.run.runId]);
+    expect(purgeJson.skippedRunIds).toEqual([]);
+
+    const slotsJson = JSON.parse(runCli(['list-slots', 'demo', '--json'])) as {
+      slots: Array<{ slotPath: string; state: string }>;
+    };
+    expect(slotsJson.slots).toHaveLength(0);
+
+    const secondRunJson = JSON.parse(runCli(['new-tree', 'demo', '--json'])) as {
+      worktrees: Array<{ worktreePath: string }>;
+    };
+    expect(realpathSync(secondRunJson.worktrees[0]!.worktreePath)).toBe(firstPoolPath);
   });
 });

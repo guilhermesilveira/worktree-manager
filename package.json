@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "vitest run",
-    "integration-test": "npm run build && vitest run tests/integration.test.ts"
+    "integration-test": "npm run build && vitest run tests/integration.test.ts tests/pool-lifecycle.integration.test.ts"
   },
   "dependencies": {
     "commander": "^14.0.3"

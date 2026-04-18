@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { addRunWorktree, createRun, deleteRun, getPrimaryRepository, getProject, getRepository, getRun, getRunWorktree, listRepositories, listRunWorktrees, listRuns, updateRunStatus } from './db.js';
-import { assertGitRepo, gitBranchExistsOnRemote, gitCommitAll, gitDeleteBranchIfExists, gitHasUncommittedChanges, gitPushHeadToBranch, gitRebaseOntoRemoteBranch, gitSyncWorktreeToBranch, gitWorktreeAdd, gitWorktreePrune, gitWorktreeRemove } from './git.js';
-import type { PushTreeRepoResult, PushTreeResult, RepositoryRow, RunRow, RunWorktreeRow } from './types.js';
+import { addRunSlot, addRunWorktree, assignConsumerSlot, clearConsumerSlot, clearPoolWorktreeConsumer, createPoolWorktree, createRun, createSlot, deletePoolWorktree, deleteRun, deleteSlot, findReusablePoolWorktree, getPrimaryRepository, getProject, getPoolWorktree, getRepository, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunWorktrees, listRuns, listStaleFreePoolWorktrees, updatePoolWorktreeState, updateRunStatus, updateSlotState, assignPoolWorktree } from './db.js';
+import { assertGitRepo, gitBranchExistsOnRemote, gitCommitAll, gitDeleteBranchIfExists, gitHasAnyChanges, gitHasUncommittedChanges, gitPrepareWorktreeForRun, gitPushHeadToBranch, gitRebaseOntoRemoteBranch, gitResetWorktreeToDefault, gitWorktreeAddDetached, gitWorktreePrune, gitWorktreeRemove } from './git.js';
+import type { CleanupConsumerResult, CleanupSlotResult, GcPoolResult, PoolWorktreeRow, PushTreeRepoResult, PushTreeResult, ReleaseTreeResult, RepositoryRow, RunRow, RunWorktreeRow, SlotRow, SlotState } from './types.js';
 
 function sanitizeSegment(value: string): string {
   return String(value || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repo';
@@ -12,6 +12,18 @@ function sanitizeSegment(value: string): string {
 
 function createRunId(): string {
   return `run-${new Date().toISOString().replaceAll(':', '').replaceAll('.', '').replaceAll('-', '').slice(0, 15)}-${randomUUID().slice(0, 8)}`;
+}
+
+function createSlotId(): string {
+  return `slot-${randomUUID().slice(0, 8)}`;
+}
+
+function createPoolWorktreeId(): string {
+  return `pool-${randomUUID().slice(0, 8)}`;
+}
+
+function olderThanIso(hours: number): string {
+  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
 function branchNameForRun(runId: string, repoName: string): string {
@@ -24,6 +36,14 @@ function manifestPath(workspaceRoot: string): string {
 
 function writeRunManifest(run: RunRow, worktrees: RunWorktreeRow[]): void {
   writeFileSync(manifestPath(run.workspaceRoot), `${JSON.stringify({ run, worktrees }, null, 2)}\n`, 'utf-8');
+}
+
+function slotPathForRun(workspaceRoot: string, repoName: string): string {
+  return join(workspaceRoot, 'repos', repoName);
+}
+
+function poolPathForProject(baseDir: string, repoName: string, poolWorktreeId: string): string {
+  return join(baseDir, 'pool', repoName, poolWorktreeId);
 }
 
 function resolveSelectedRepositories(nickname: string, selectedNames: string[]): RepositoryRow[] {
@@ -45,30 +65,140 @@ function resolveSelectedRepositories(nickname: string, selectedNames: string[]):
   });
 }
 
-function createWorktreeForRepository(run: RunRow, repository: RepositoryRow): RunWorktreeRow {
+function recreateSymlink(linkPath: string, targetPath: string): void {
+  rmSync(linkPath, { recursive: true, force: true });
+  mkdirSync(dirname(linkPath), { recursive: true });
+  symlinkSync(targetPath, linkPath, 'dir');
+}
+
+function ensurePoolWorktreeForRepository(run: RunRow, repository: RepositoryRow, consumerId?: string): PoolWorktreeRow {
+  const project = getProject(run.nickname);
+  if (!project) {
+    throw new Error(`Unknown nickname: ${run.nickname}`);
+  }
+
+  const reusablePool = findReusablePoolWorktree(run.nickname, repository.name);
+  if (reusablePool && existsSync(reusablePool.poolPath)) {
+    return assignPoolWorktree(reusablePool.poolWorktreeId, consumerId);
+  }
+  if (reusablePool && !existsSync(reusablePool.poolPath)) {
+    updatePoolWorktreeState(reusablePool.poolWorktreeId, 'BROKEN');
+    clearPoolWorktreeConsumer(reusablePool.poolWorktreeId);
+  }
+
   assertGitRepo(repository.localPath);
   gitWorktreePrune(repository.localPath);
 
-  const branchName = branchNameForRun(run.runId, repository.name);
-  const worktreePath = join(run.workspaceRoot, 'repos', repository.name);
-  if (existsSync(worktreePath)) {
-    rmSync(worktreePath, { recursive: true, force: true });
-  }
-  gitDeleteBranchIfExists(repository.localPath, branchName);
-  mkdirSync(join(run.workspaceRoot, 'repos'), { recursive: true });
-  gitWorktreeAdd(repository.localPath, worktreePath, branchName);
-  gitSyncWorktreeToBranch(worktreePath, repository.defaultBranch);
+  const poolWorktreeId = createPoolWorktreeId();
+  const poolPath = poolPathForProject(project.baseDir, repository.name, poolWorktreeId);
+  rmSync(poolPath, { recursive: true, force: true });
+  mkdirSync(join(project.baseDir, 'pool', repository.name), { recursive: true });
+  gitWorktreeAddDetached(repository.localPath, poolPath);
 
-  return addRunWorktree({
-    runId: run.runId,
+  return createPoolWorktree({
+    poolWorktreeId,
+    nickname: run.nickname,
     repoName: repository.name,
-    worktreePath,
-    branchName,
-    isPrimary: repository.isPrimary,
+    poolPath,
+    state: 'BUSY',
+    currentConsumerId: consumerId,
   });
 }
 
-export function createNewTree(nickname: string, selectedRepoNames: string[]): { run: RunRow; worktrees: RunWorktreeRow[] } {
+function createRunSlotForRepository(run: RunRow, repository: RepositoryRow, consumerId?: string): { slot: SlotRow; poolWorktree: PoolWorktreeRow; worktree: RunWorktreeRow } {
+  const poolWorktree = ensurePoolWorktreeForRepository(run, repository, consumerId);
+  const branchName = branchNameForRun(run.runId, repository.name);
+  gitPrepareWorktreeForRun(poolWorktree.poolPath, branchName, repository.defaultBranch);
+
+  const slotId = createSlotId();
+  const slotPath = slotPathForRun(run.workspaceRoot, repository.name);
+  mkdirSync(join(run.workspaceRoot, 'repos'), { recursive: true });
+  recreateSymlink(slotPath, poolWorktree.poolPath);
+
+  const slot = createSlot({
+    slotId,
+    nickname: run.nickname,
+    repoName: repository.name,
+    slotPath,
+    poolWorktreeId: poolWorktree.poolWorktreeId,
+    state: 'BUSY',
+    currentConsumerId: consumerId,
+  });
+  if (consumerId) {
+    assignConsumerSlot(consumerId, slot.slotId);
+  }
+  addRunSlot({
+    runId: run.runId,
+    slotId: slot.slotId,
+    repoName: repository.name,
+    poolWorktreeId: poolWorktree.poolWorktreeId,
+  });
+
+  const worktree = addRunWorktree({
+    runId: run.runId,
+    repoName: repository.name,
+    worktreePath: slot.slotPath,
+    branchName,
+    poolWorktreeId: poolWorktree.poolWorktreeId,
+    isPrimary: repository.isPrimary,
+  });
+
+  return { slot, poolWorktree, worktree };
+}
+
+function cleanupAssignedPool(repository: RepositoryRow, slot: SlotRow, poolWorktree: PoolWorktreeRow, branchName?: string): CleanupSlotResult {
+  try {
+    gitResetWorktreeToDefault(poolWorktree.poolPath, repository.defaultBranch);
+    if (branchName) {
+      gitDeleteBranchIfExists(repository.localPath, branchName);
+    }
+    rmSync(slot.slotPath, { recursive: true, force: true });
+    clearConsumerSlot(slot.slotId);
+    clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+    const cleanedSlot = updateSlotState(slot.slotId, 'FREE');
+    updatePoolWorktreeState(poolWorktree.poolWorktreeId, 'FREE');
+    return {
+      slotId: cleanedSlot.slotId,
+      repoName: cleanedSlot.repoName,
+      slotPath: cleanedSlot.slotPath,
+      state: 'FREE',
+    };
+  } catch {
+    rmSync(slot.slotPath, { recursive: true, force: true });
+    clearConsumerSlot(slot.slotId);
+    clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+    updatePoolWorktreeState(poolWorktree.poolWorktreeId, 'BROKEN');
+    const brokenSlot = updateSlotState(slot.slotId, 'BROKEN');
+    return {
+      slotId: brokenSlot.slotId,
+      repoName: brokenSlot.repoName,
+      slotPath: brokenSlot.slotPath,
+      state: brokenSlot.state,
+    };
+  }
+}
+
+function releaseAssignedPoolWithoutCleanup(slot: SlotRow, poolWorktree: PoolWorktreeRow): CleanupSlotResult {
+  let nextState: SlotState = 'DIRTY';
+  try {
+    nextState = gitHasAnyChanges(poolWorktree.poolPath) ? 'DIRTY' : 'FREE';
+  } catch {
+    nextState = 'BROKEN';
+  }
+  rmSync(slot.slotPath, { recursive: true, force: true });
+  clearConsumerSlot(slot.slotId);
+  clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+  updatePoolWorktreeState(poolWorktree.poolWorktreeId, nextState);
+  const updatedSlot = updateSlotState(slot.slotId, nextState);
+  return {
+    slotId: updatedSlot.slotId,
+    repoName: updatedSlot.repoName,
+    slotPath: updatedSlot.slotPath,
+    state: updatedSlot.state,
+  };
+}
+
+export function createNewTree(nickname: string, selectedRepoNames: string[], consumerId?: string): { run: RunRow; worktrees: RunWorktreeRow[] } {
   const project = getProject(nickname);
   if (!project) {
     throw new Error(`Unknown nickname: ${nickname}`);
@@ -87,7 +217,7 @@ export function createNewTree(nickname: string, selectedRepoNames: string[]): { 
   });
 
   try {
-    const worktrees = selectedRepositories.map((repository) => createWorktreeForRepository(run, repository));
+    const worktrees = selectedRepositories.map((repository) => createRunSlotForRepository(run, repository, consumerId).worktree);
     writeRunManifest(run, worktrees);
     return { run, worktrees };
   } catch (error: unknown) {
@@ -96,7 +226,7 @@ export function createNewTree(nickname: string, selectedRepoNames: string[]): { 
   }
 }
 
-export function promoteRunRepository(runId: string, repoName: string): { run: RunRow; worktree: RunWorktreeRow } {
+export function promoteRunRepository(runId: string, repoName: string, consumerId?: string): { run: RunRow; worktree: RunWorktreeRow } {
   const run = getRun(runId);
   if (!run) {
     throw new Error(`Unknown run: ${runId}`);
@@ -109,9 +239,61 @@ export function promoteRunRepository(runId: string, repoName: string): { run: Ru
   if (!repository) {
     throw new Error(`Unknown repository ${repoName} for nickname ${run.nickname}`);
   }
-  const worktree = createWorktreeForRepository(run, repository);
+  const { worktree } = createRunSlotForRepository(run, repository, consumerId);
   writeRunManifest(run, listRunWorktrees(runId));
   return { run, worktree };
+}
+
+export function releaseRunTree(runId: string, cleanup = false): ReleaseTreeResult {
+  const run = getRun(runId);
+  if (!run) {
+    throw new Error(`Unknown run: ${runId}`);
+  }
+
+  const worktrees = listRunWorktrees(runId);
+  const slots = worktrees.map((worktree) => {
+    const repository = getRepository(run.nickname, worktree.repoName);
+    const slot = getSlot(listRunSlots(runId).find((entry) => entry.repoName === worktree.repoName)?.slotId || '');
+    const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+    if (!repository || !slot || !poolWorktree) {
+      throw new Error(`Missing pool or slot metadata for ${worktree.repoName}`);
+    }
+    return cleanup
+      ? cleanupAssignedPool(repository, slot, poolWorktree, worktree.branchName)
+      : releaseAssignedPoolWithoutCleanup(slot, poolWorktree);
+  });
+
+  return { run, slots };
+}
+
+export function cleanupOneSlot(slotId: string): CleanupSlotResult {
+  const slot = getSlot(slotId);
+  if (!slot) {
+    throw new Error(`Unknown slot: ${slotId}`);
+  }
+  const repository = getRepository(slot.nickname, slot.repoName);
+  const poolWorktree = getPoolWorktree(slot.poolWorktreeId);
+  if (!repository || !poolWorktree) {
+    clearConsumerSlot(slotId);
+    if (poolWorktree) {
+      clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+      updatePoolWorktreeState(poolWorktree.poolWorktreeId, 'BROKEN');
+    }
+    const brokenSlot = updateSlotState(slotId, 'BROKEN');
+    return {
+      slotId: brokenSlot.slotId,
+      repoName: brokenSlot.repoName,
+      slotPath: brokenSlot.slotPath,
+      state: brokenSlot.state,
+    };
+  }
+  return cleanupAssignedPool(repository, slot, poolWorktree);
+}
+
+export function cleanupConsumerSlots(consumerId: string): CleanupConsumerResult {
+  const consumerSlots = listConsumerSlots(consumerId);
+  const slots = consumerSlots.map((consumerSlot) => cleanupOneSlot(consumerSlot.slotId));
+  return { consumerId, slots };
 }
 
 export function pushRunTree(runId: string): PushTreeResult {
@@ -131,18 +313,19 @@ export function pushRunTree(runId: string): PushTreeResult {
   try {
     for (const worktree of worktrees) {
       const repository = repositoryByName.get(worktree.repoName);
-      if (!repository) {
-        throw new Error(`Missing repository metadata for ${worktree.repoName}`);
+      const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+      if (!repository || !poolWorktree) {
+        throw new Error(`Missing repository or pool metadata for ${worktree.repoName}`);
       }
 
-      const commitCreated = gitHasUncommittedChanges(worktree.worktreePath)
-        ? gitCommitAll(worktree.worktreePath, `worktree-manager: sync ${worktree.repoName} from ${run.runId}`)
+      const commitCreated = gitHasUncommittedChanges(poolWorktree.poolPath)
+        ? gitCommitAll(poolWorktree.poolPath, `worktree-manager: sync ${worktree.repoName} from ${run.runId}`)
         : false;
 
-      if (gitBranchExistsOnRemote(worktree.worktreePath, worktree.branchName)) {
-        gitRebaseOntoRemoteBranch(worktree.worktreePath, worktree.branchName);
+      if (gitBranchExistsOnRemote(poolWorktree.poolPath, worktree.branchName)) {
+        gitRebaseOntoRemoteBranch(poolWorktree.poolPath, worktree.branchName);
       }
-      const pushed = gitPushHeadToBranch(worktree.worktreePath, worktree.branchName);
+      const pushed = gitPushHeadToBranch(poolWorktree.poolPath, worktree.branchName);
 
       results.push({
         repoName: worktree.repoName,
@@ -175,24 +358,49 @@ export function purgeTrees(nickname?: string, force = false): { purgedRunIds: st
       continue;
     }
 
-    const worktrees = listRunWorktrees(run.runId);
-    for (const worktree of worktrees) {
-      const repository = getRepository(run.nickname, worktree.repoName);
-      if (repository) {
-        try {
-          gitWorktreeRemove(repository.localPath, worktree.worktreePath);
-        } catch {
-          rmSync(worktree.worktreePath, { recursive: true, force: true });
-        }
-      } else {
-        rmSync(worktree.worktreePath, { recursive: true, force: true });
-      }
+    const runSlots = listRunSlots(run.runId);
+    releaseRunTree(run.runId, true);
+    for (const runSlot of runSlots) {
+      deleteSlot(runSlot.slotId);
     }
-
     rmSync(run.workspaceRoot, { recursive: true, force: true });
     deleteRun(run.runId);
     purgedRunIds.push(run.runId);
   }
 
   return { purgedRunIds, skippedRunIds };
+}
+
+export function gcPoolWorktrees(olderThanHours: number, nickname?: string): GcPoolResult {
+  if (!Number.isFinite(olderThanHours) || olderThanHours < 0) {
+    throw new Error(`olderThanHours must be a non-negative number: ${olderThanHours}`);
+  }
+
+  const poolsToRemove = olderThanHours === 0
+    ? listPoolWorktrees(nickname).filter((poolWorktree) => poolWorktree.state === 'FREE')
+    : listStaleFreePoolWorktrees(olderThanIso(olderThanHours), nickname);
+  const removed: GcPoolResult['removed'] = [];
+  const skipped: string[] = [];
+
+  for (const poolWorktree of poolsToRemove) {
+    const repository = getRepository(poolWorktree.nickname, poolWorktree.repoName);
+    if (!repository) {
+      skipped.push(poolWorktree.poolWorktreeId);
+      continue;
+    }
+
+    try {
+      gitWorktreeRemove(repository.localPath, poolWorktree.poolPath);
+    } catch {
+      rmSync(poolWorktree.poolPath, { recursive: true, force: true });
+    }
+    deletePoolWorktree(poolWorktree.poolWorktreeId);
+    removed.push({
+      poolWorktreeId: poolWorktree.poolWorktreeId,
+      repoName: poolWorktree.repoName,
+      poolPath: poolWorktree.poolPath,
+    });
+  }
+
+  return { removed, skipped };
 }

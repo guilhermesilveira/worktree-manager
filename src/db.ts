@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { resolveAppDir, resolveDatabasePath } from './paths.js';
-import type { ProjectRow, RepositoryRow, RunRow, RunStatus, RunWorktreeRow } from './types.js';
+import type { ConsumerSlotRow, PoolStats, PoolWorktreeInspection, PoolWorktreeInspectionRun, PoolWorktreeInspectionSlot, PoolWorktreeRow, ProjectRow, RepositoryRow, RunRow, RunSlotRow, RunStatus, RunWorktreeRow, SlotInspection, SlotInspectionRun, SlotRow, SlotState, SlotStats, SlotStatsByNickname, SlotStatsByRepo, SlotStateCount } from './types.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -67,6 +67,7 @@ function mapRunWorktreeRow(row: {
   repo_name: string;
   worktree_path: string;
   branch_name: string;
+  pool_worktree_id: string;
   is_primary: number;
   created_at: string;
   updated_at: string;
@@ -77,9 +78,154 @@ function mapRunWorktreeRow(row: {
     repoName: row.repo_name,
     worktreePath: row.worktree_path,
     branchName: row.branch_name,
+    poolWorktreeId: row.pool_worktree_id,
     isPrimary: row.is_primary === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapSlotRow(row: {
+  slot_id: string;
+  nickname: string;
+  repo_name: string;
+  slot_path: string;
+  pool_worktree_id: string;
+  state: string;
+  current_consumer_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string;
+}): SlotRow {
+  return {
+    slotId: row.slot_id,
+    nickname: row.nickname,
+    repoName: row.repo_name,
+    slotPath: row.slot_path,
+    poolWorktreeId: row.pool_worktree_id,
+    state: row.state as SlotState,
+    currentConsumerId: row.current_consumer_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastUsedAt: row.last_used_at,
+  };
+}
+
+function mapRunSlotRow(row: {
+  id: number;
+  run_id: string;
+  slot_id: string;
+  repo_name: string;
+  pool_worktree_id: string;
+  created_at: string;
+}): RunSlotRow {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    slotId: row.slot_id,
+    repoName: row.repo_name,
+    poolWorktreeId: row.pool_worktree_id,
+    createdAt: row.created_at,
+  };
+}
+
+function mapPoolWorktreeRow(row: {
+  pool_worktree_id: string;
+  nickname: string;
+  repo_name: string;
+  pool_path: string;
+  state: string;
+  current_consumer_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string;
+}): PoolWorktreeRow {
+  return {
+    poolWorktreeId: row.pool_worktree_id,
+    nickname: row.nickname,
+    repoName: row.repo_name,
+    poolPath: row.pool_path,
+    state: row.state as SlotState,
+    currentConsumerId: row.current_consumer_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastUsedAt: row.last_used_at,
+  };
+}
+
+function mapPoolWorktreeInspectionSlot(row: {
+  slot_id: string;
+  slot_path: string;
+  state: string;
+  current_consumer_id: string | null;
+  created_at: string;
+}): PoolWorktreeInspectionSlot {
+  return {
+    slotId: row.slot_id,
+    slotPath: row.slot_path,
+    state: row.state as SlotState,
+    currentConsumerId: row.current_consumer_id,
+    createdAt: row.created_at,
+  };
+}
+
+function mapPoolWorktreeInspectionRun(row: {
+  run_id: string;
+  status: string;
+  workspace_root: string;
+  repo_name: string;
+  branch_name: string | null;
+  slot_id: string | null;
+  slot_path: string | null;
+  created_at: string;
+}): PoolWorktreeInspectionRun {
+  return {
+    runId: row.run_id,
+    status: row.status as RunStatus,
+    workspaceRoot: row.workspace_root,
+    repoName: row.repo_name,
+    branchName: row.branch_name,
+    slotId: row.slot_id,
+    slotPath: row.slot_path,
+    createdAt: row.created_at,
+  };
+}
+
+function mapConsumerSlotRow(row: {
+  id: number;
+  consumer_id: string;
+  slot_id: string;
+  created_at: string;
+  updated_at: string;
+}): ConsumerSlotRow {
+  return {
+    id: row.id,
+    consumerId: row.consumer_id,
+    slotId: row.slot_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapSlotInspectionRun(row: {
+  run_id: string;
+  status: string;
+  workspace_root: string;
+  repo_name: string;
+  pool_worktree_id: string;
+  branch_name: string | null;
+  is_primary: number | null;
+  created_at: string;
+}): SlotInspectionRun {
+  return {
+    runId: row.run_id,
+    status: row.status as RunStatus,
+    workspaceRoot: row.workspace_root,
+    repoName: row.repo_name,
+    poolWorktreeId: row.pool_worktree_id,
+    branchName: row.branch_name,
+    isPrimary: row.is_primary === null ? null : row.is_primary === 1,
+    createdAt: row.created_at,
   };
 }
 
@@ -131,11 +277,62 @@ function openDb(): DatabaseSync {
       repo_name TEXT NOT NULL,
       worktree_path TEXT NOT NULL,
       branch_name TEXT NOT NULL,
+      pool_worktree_id TEXT NOT NULL DEFAULT '',
       is_primary INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(run_id, repo_name),
       FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS slots (
+      slot_id TEXT PRIMARY KEY,
+      nickname TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      slot_path TEXT NOT NULL,
+      pool_worktree_id TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL,
+      current_consumer_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      FOREIGN KEY(nickname) REFERENCES projects(nickname) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS run_slots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      slot_id TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pool_worktree_id TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      UNIQUE(run_id, slot_id),
+      UNIQUE(run_id, repo_name),
+      FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+      FOREIGN KEY(slot_id) REFERENCES slots(slot_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS consumer_slots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      consumer_id TEXT NOT NULL,
+      slot_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(consumer_id, slot_id),
+      FOREIGN KEY(slot_id) REFERENCES slots(slot_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS pool_worktrees (
+      pool_worktree_id TEXT PRIMARY KEY,
+      nickname TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pool_path TEXT NOT NULL,
+      state TEXT NOT NULL,
+      current_consumer_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      FOREIGN KEY(nickname) REFERENCES projects(nickname) ON DELETE CASCADE
     );
   `);
 
@@ -143,6 +340,21 @@ function openDb(): DatabaseSync {
   const hasPrimaryColumn = repositoryColumns.some((column) => column.name === 'is_primary');
   if (!hasPrimaryColumn) {
     db.exec('ALTER TABLE repositories ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0;');
+  }
+
+  const runWorktreeColumns = db.prepare('PRAGMA table_info(run_worktrees)').all() as Array<{ name: string }>;
+  if (!runWorktreeColumns.some((column) => column.name === 'pool_worktree_id')) {
+    db.exec("ALTER TABLE run_worktrees ADD COLUMN pool_worktree_id TEXT NOT NULL DEFAULT '';");
+  }
+
+  const slotColumns = db.prepare('PRAGMA table_info(slots)').all() as Array<{ name: string }>;
+  if (!slotColumns.some((column) => column.name === 'pool_worktree_id')) {
+    db.exec("ALTER TABLE slots ADD COLUMN pool_worktree_id TEXT NOT NULL DEFAULT '';");
+  }
+
+  const runSlotColumns = db.prepare('PRAGMA table_info(run_slots)').all() as Array<{ name: string }>;
+  if (!runSlotColumns.some((column) => column.name === 'pool_worktree_id')) {
+    db.exec("ALTER TABLE run_slots ADD COLUMN pool_worktree_id TEXT NOT NULL DEFAULT '';");
   }
 
   return db;
@@ -417,6 +629,7 @@ export function addRunWorktree(input: {
   repoName: string;
   worktreePath: string;
   branchName: string;
+  poolWorktreeId: string;
   isPrimary: boolean;
 }): RunWorktreeRow {
   const db = openDb();
@@ -427,14 +640,16 @@ export function addRunWorktree(input: {
       repo_name,
       worktree_path,
       branch_name,
+      pool_worktree_id,
       is_primary,
       created_at,
       updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id, repo_name) DO UPDATE SET
       worktree_path = excluded.worktree_path,
       branch_name = excluded.branch_name,
+      pool_worktree_id = excluded.pool_worktree_id,
       is_primary = excluded.is_primary,
       updated_at = excluded.updated_at
   `).run(
@@ -442,13 +657,14 @@ export function addRunWorktree(input: {
     input.repoName,
     input.worktreePath,
     input.branchName,
+    input.poolWorktreeId,
     input.isPrimary ? 1 : 0,
     timestamp,
     timestamp,
   );
 
   const row = db.prepare(`
-    SELECT id, run_id, repo_name, worktree_path, branch_name, is_primary, created_at, updated_at
+    SELECT id, run_id, repo_name, worktree_path, branch_name, pool_worktree_id, is_primary, created_at, updated_at
     FROM run_worktrees
     WHERE run_id = ? AND repo_name = ?
   `).get(input.runId, input.repoName) as {
@@ -457,6 +673,7 @@ export function addRunWorktree(input: {
     repo_name: string;
     worktree_path: string;
     branch_name: string;
+    pool_worktree_id: string;
     is_primary: number;
     created_at: string;
     updated_at: string;
@@ -467,7 +684,7 @@ export function addRunWorktree(input: {
 export function getRunWorktree(runId: string, repoName: string): RunWorktreeRow | null {
   const db = openDb();
   const row = db.prepare(`
-    SELECT id, run_id, repo_name, worktree_path, branch_name, is_primary, created_at, updated_at
+    SELECT id, run_id, repo_name, worktree_path, branch_name, pool_worktree_id, is_primary, created_at, updated_at
     FROM run_worktrees
     WHERE run_id = ? AND repo_name = ?
   `).get(runId, repoName) as {
@@ -476,6 +693,7 @@ export function getRunWorktree(runId: string, repoName: string): RunWorktreeRow 
     repo_name: string;
     worktree_path: string;
     branch_name: string;
+    pool_worktree_id: string;
     is_primary: number;
     created_at: string;
     updated_at: string;
@@ -486,7 +704,7 @@ export function getRunWorktree(runId: string, repoName: string): RunWorktreeRow 
 export function listRunWorktrees(runId: string): RunWorktreeRow[] {
   const db = openDb();
   const rows = db.prepare(`
-    SELECT id, run_id, repo_name, worktree_path, branch_name, is_primary, created_at, updated_at
+    SELECT id, run_id, repo_name, worktree_path, branch_name, pool_worktree_id, is_primary, created_at, updated_at
     FROM run_worktrees
     WHERE run_id = ?
     ORDER BY is_primary DESC, repo_name ASC
@@ -496,6 +714,7 @@ export function listRunWorktrees(runId: string): RunWorktreeRow[] {
     repo_name: string;
     worktree_path: string;
     branch_name: string;
+    pool_worktree_id: string;
     is_primary: number;
     created_at: string;
     updated_at: string;
@@ -506,4 +725,813 @@ export function listRunWorktrees(runId: string): RunWorktreeRow[] {
 export function deleteRun(runId: string): void {
   const db = openDb();
   db.prepare('DELETE FROM runs WHERE run_id = ?').run(runId);
+}
+
+export function createSlot(input: {
+  slotId: string;
+  nickname: string;
+  repoName: string;
+  slotPath: string;
+  poolWorktreeId: string;
+  state: SlotState;
+  currentConsumerId?: string;
+}): SlotRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO slots (
+      slot_id,
+      nickname,
+      repo_name,
+      slot_path,
+      pool_worktree_id,
+      state,
+      current_consumer_id,
+      created_at,
+      updated_at,
+      last_used_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(slot_id) DO UPDATE SET
+      nickname = excluded.nickname,
+      repo_name = excluded.repo_name,
+      slot_path = excluded.slot_path,
+      pool_worktree_id = excluded.pool_worktree_id,
+      state = excluded.state,
+      current_consumer_id = excluded.current_consumer_id,
+      updated_at = excluded.updated_at,
+      last_used_at = excluded.last_used_at
+  `).run(
+    input.slotId,
+    input.nickname,
+    input.repoName,
+    input.slotPath,
+    input.poolWorktreeId,
+    input.state,
+    input.currentConsumerId ?? null,
+    timestamp,
+    timestamp,
+    timestamp,
+  );
+
+  const row = db.prepare(`
+    SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM slots
+    WHERE slot_id = ?
+  `).get(input.slotId) as {
+    slot_id: string;
+    nickname: string;
+    repo_name: string;
+    slot_path: string;
+    pool_worktree_id: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapSlotRow(row);
+}
+
+export function createPoolWorktree(input: {
+  poolWorktreeId: string;
+  nickname: string;
+  repoName: string;
+  poolPath: string;
+  state: SlotState;
+  currentConsumerId?: string;
+}): PoolWorktreeRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO pool_worktrees (
+      pool_worktree_id,
+      nickname,
+      repo_name,
+      pool_path,
+      state,
+      current_consumer_id,
+      created_at,
+      updated_at,
+      last_used_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(pool_worktree_id) DO UPDATE SET
+      nickname = excluded.nickname,
+      repo_name = excluded.repo_name,
+      pool_path = excluded.pool_path,
+      state = excluded.state,
+      current_consumer_id = excluded.current_consumer_id,
+      updated_at = excluded.updated_at,
+      last_used_at = excluded.last_used_at
+  `).run(
+    input.poolWorktreeId,
+    input.nickname,
+    input.repoName,
+    input.poolPath,
+    input.state,
+    input.currentConsumerId ?? null,
+    timestamp,
+    timestamp,
+    timestamp,
+  );
+
+  const row = db.prepare(`
+    SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM pool_worktrees
+    WHERE pool_worktree_id = ?
+  `).get(input.poolWorktreeId) as {
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapPoolWorktreeRow(row);
+}
+
+export function getPoolWorktree(poolWorktreeId: string): PoolWorktreeRow | null {
+  const db = openDb();
+  const row = db.prepare(`
+    SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM pool_worktrees
+    WHERE pool_worktree_id = ?
+  `).get(poolWorktreeId) as {
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  } | undefined;
+  return row ? mapPoolWorktreeRow(row) : null;
+}
+
+export function listPoolWorktrees(nickname?: string): PoolWorktreeRow[] {
+  const db = openDb();
+  const rows = nickname
+    ? db.prepare(`
+        SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM pool_worktrees
+        WHERE nickname = ?
+        ORDER BY nickname ASC, repo_name ASC, pool_worktree_id ASC
+      `).all(nickname)
+    : db.prepare(`
+        SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM pool_worktrees
+        ORDER BY nickname ASC, repo_name ASC, pool_worktree_id ASC
+      `).all();
+
+  return (rows as Array<{
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  }>).map(mapPoolWorktreeRow);
+}
+
+export function inspectPoolWorktree(poolWorktreeId: string): PoolWorktreeInspection | null {
+  const poolWorktree = getPoolWorktree(poolWorktreeId);
+  if (!poolWorktree) {
+    return null;
+  }
+  const db = openDb();
+  const slotRows = db.prepare(`
+    SELECT slot_id, slot_path, state, current_consumer_id, created_at
+    FROM slots
+    WHERE pool_worktree_id = ?
+    ORDER BY created_at DESC, slot_id DESC
+  `).all(poolWorktreeId) as Array<{
+    slot_id: string;
+    slot_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+  }>;
+  const runRows = db.prepare(`
+    SELECT
+      runs.run_id,
+      runs.status,
+      runs.workspace_root,
+      run_worktrees.repo_name,
+      run_worktrees.branch_name,
+      slots.slot_id,
+      slots.slot_path,
+      run_worktrees.created_at
+    FROM run_worktrees
+    JOIN runs ON runs.run_id = run_worktrees.run_id
+    LEFT JOIN slots
+      ON slots.pool_worktree_id = run_worktrees.pool_worktree_id
+      AND slots.repo_name = run_worktrees.repo_name
+    WHERE run_worktrees.pool_worktree_id = ?
+    ORDER BY run_worktrees.created_at DESC, runs.run_id DESC
+  `).all(poolWorktreeId) as Array<{
+    run_id: string;
+    status: string;
+    workspace_root: string;
+    repo_name: string;
+    branch_name: string | null;
+    slot_id: string | null;
+    slot_path: string | null;
+    created_at: string;
+  }>;
+
+  return {
+    poolWorktree,
+    slots: slotRows.map(mapPoolWorktreeInspectionSlot),
+    runs: runRows.map(mapPoolWorktreeInspectionRun),
+  };
+}
+
+export function findReusablePoolWorktree(nickname: string, repoName: string): PoolWorktreeRow | null {
+  const db = openDb();
+  const row = db.prepare(`
+    SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM pool_worktrees
+    WHERE nickname = ? AND repo_name = ? AND state = 'FREE'
+    ORDER BY last_used_at ASC, pool_worktree_id ASC
+    LIMIT 1
+  `).get(nickname, repoName) as {
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  } | undefined;
+  return row ? mapPoolWorktreeRow(row) : null;
+}
+
+export function listStaleFreePoolWorktrees(olderThanIso: string, nickname?: string): PoolWorktreeRow[] {
+  const db = openDb();
+  const rows = nickname
+    ? db.prepare(`
+        SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM pool_worktrees
+        WHERE nickname = ? AND state = 'FREE' AND last_used_at < ?
+        ORDER BY last_used_at ASC, pool_worktree_id ASC
+      `).all(nickname, olderThanIso)
+    : db.prepare(`
+        SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM pool_worktrees
+        WHERE state = 'FREE' AND last_used_at < ?
+        ORDER BY last_used_at ASC, pool_worktree_id ASC
+      `).all(olderThanIso);
+
+  return (rows as Array<{
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  }>).map(mapPoolWorktreeRow);
+}
+
+export function getSlot(slotId: string): SlotRow | null {
+  const db = openDb();
+  const row = db.prepare(`
+    SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM slots
+    WHERE slot_id = ?
+  `).get(slotId) as {
+    slot_id: string;
+    nickname: string;
+    repo_name: string;
+    slot_path: string;
+    pool_worktree_id: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  } | undefined;
+  return row ? mapSlotRow(row) : null;
+}
+
+export function listSlots(nickname?: string): SlotRow[] {
+  const db = openDb();
+  const rows = nickname
+    ? db.prepare(`
+        SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM slots
+        WHERE nickname = ?
+        ORDER BY nickname ASC, repo_name ASC, slot_id ASC
+      `).all(nickname)
+    : db.prepare(`
+        SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+        FROM slots
+        ORDER BY nickname ASC, repo_name ASC, slot_id ASC
+      `).all();
+
+  return (rows as Array<{
+    slot_id: string;
+    nickname: string;
+    repo_name: string;
+    slot_path: string;
+    pool_worktree_id: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  }>).map(mapSlotRow);
+}
+
+export function inspectSlot(slotId: string): SlotInspection | null {
+  const slot = getSlot(slotId);
+  if (!slot) {
+    return null;
+  }
+  const db = openDb();
+  const poolWorktree = getPoolWorktree(slot.poolWorktreeId);
+  const runRows = db.prepare(`
+    SELECT
+      runs.run_id,
+      runs.status,
+      runs.workspace_root,
+      run_slots.repo_name,
+      run_slots.pool_worktree_id,
+      run_worktrees.branch_name,
+      run_worktrees.is_primary,
+      run_slots.created_at
+    FROM run_slots
+    JOIN runs ON runs.run_id = run_slots.run_id
+    LEFT JOIN run_worktrees
+      ON run_worktrees.run_id = run_slots.run_id
+      AND run_worktrees.repo_name = run_slots.repo_name
+    WHERE run_slots.slot_id = ?
+    ORDER BY run_slots.created_at DESC, runs.run_id DESC
+  `).all(slotId) as Array<{
+    run_id: string;
+    status: string;
+    workspace_root: string;
+    repo_name: string;
+    pool_worktree_id: string;
+    branch_name: string | null;
+    is_primary: number | null;
+    created_at: string;
+  }>;
+
+  const consumerRows = db.prepare(`
+    SELECT id, consumer_id, slot_id, created_at, updated_at
+    FROM consumer_slots
+    WHERE slot_id = ?
+    ORDER BY updated_at DESC, id DESC
+  `).all(slotId) as Array<{
+    id: number;
+    consumer_id: string;
+    slot_id: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+
+  return {
+    slot,
+    poolWorktree,
+    runs: runRows.map(mapSlotInspectionRun),
+    consumers: consumerRows.map(mapConsumerSlotRow),
+  };
+}
+
+function mapSlotStateCount(row: { state: string; total: number }): SlotStateCount {
+  return {
+    state: row.state as SlotState,
+    total: Number(row.total || 0),
+  };
+}
+
+function mapSlotStatsByNickname(row: {
+  nickname: string;
+  total: number;
+  free: number;
+  busy: number;
+  dirty: number;
+  broken: number;
+}): SlotStatsByNickname {
+  return {
+    nickname: row.nickname,
+    total: Number(row.total || 0),
+    free: Number(row.free || 0),
+    busy: Number(row.busy || 0),
+    dirty: Number(row.dirty || 0),
+    broken: Number(row.broken || 0),
+  };
+}
+
+function mapSlotStatsByRepo(row: {
+  nickname: string;
+  repo_name: string;
+  total: number;
+  free: number;
+  busy: number;
+  dirty: number;
+  broken: number;
+}): SlotStatsByRepo {
+  return {
+    nickname: row.nickname,
+    repoName: row.repo_name,
+    total: Number(row.total || 0),
+    free: Number(row.free || 0),
+    busy: Number(row.busy || 0),
+    dirty: Number(row.dirty || 0),
+    broken: Number(row.broken || 0),
+  };
+}
+
+export function getSlotStats(nickname?: string): SlotStats {
+  const db = openDb();
+  const filterClause = nickname ? 'WHERE nickname = ?' : '';
+  const params = nickname ? [nickname] : [];
+
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) AS total
+    FROM slots
+    ${filterClause}
+  `).get(...params) as { total: number };
+
+  const byStateRows = db.prepare(`
+    SELECT state, COUNT(*) AS total
+    FROM slots
+    ${filterClause}
+    GROUP BY state
+    ORDER BY state ASC
+  `).all(...params) as Array<{ state: string; total: number }>;
+
+  const byNicknameRows = db.prepare(`
+    SELECT
+      nickname,
+      COUNT(*) AS total,
+      SUM(CASE WHEN state = 'FREE' THEN 1 ELSE 0 END) AS free,
+      SUM(CASE WHEN state = 'BUSY' THEN 1 ELSE 0 END) AS busy,
+      SUM(CASE WHEN state = 'DIRTY' THEN 1 ELSE 0 END) AS dirty,
+      SUM(CASE WHEN state = 'BROKEN' THEN 1 ELSE 0 END) AS broken
+    FROM slots
+    ${filterClause}
+    GROUP BY nickname
+    ORDER BY nickname ASC
+  `).all(...params) as Array<{
+    nickname: string;
+    total: number;
+    free: number;
+    busy: number;
+    dirty: number;
+    broken: number;
+  }>;
+
+  const byRepoRows = db.prepare(`
+    SELECT
+      nickname,
+      repo_name,
+      COUNT(*) AS total,
+      SUM(CASE WHEN state = 'FREE' THEN 1 ELSE 0 END) AS free,
+      SUM(CASE WHEN state = 'BUSY' THEN 1 ELSE 0 END) AS busy,
+      SUM(CASE WHEN state = 'DIRTY' THEN 1 ELSE 0 END) AS dirty,
+      SUM(CASE WHEN state = 'BROKEN' THEN 1 ELSE 0 END) AS broken
+    FROM slots
+    ${filterClause}
+    GROUP BY nickname, repo_name
+    ORDER BY nickname ASC, repo_name ASC
+  `).all(...params) as Array<{
+    nickname: string;
+    repo_name: string;
+    total: number;
+    free: number;
+    busy: number;
+    dirty: number;
+    broken: number;
+  }>;
+
+  return {
+    total: Number(totalRow.total || 0),
+    byState: byStateRows.map(mapSlotStateCount),
+    byNickname: byNicknameRows.map(mapSlotStatsByNickname),
+    byRepo: byRepoRows.map(mapSlotStatsByRepo),
+  };
+}
+
+export function getPoolStats(nickname?: string): PoolStats {
+  const db = openDb();
+  const filterClause = nickname ? 'WHERE nickname = ?' : '';
+  const params = nickname ? [nickname] : [];
+
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) AS total
+    FROM pool_worktrees
+    ${filterClause}
+  `).get(...params) as { total: number };
+
+  const byStateRows = db.prepare(`
+    SELECT state, COUNT(*) AS total
+    FROM pool_worktrees
+    ${filterClause}
+    GROUP BY state
+    ORDER BY state ASC
+  `).all(...params) as Array<{ state: string; total: number }>;
+
+  const byNicknameRows = db.prepare(`
+    SELECT
+      nickname,
+      COUNT(*) AS total,
+      SUM(CASE WHEN state = 'FREE' THEN 1 ELSE 0 END) AS free,
+      SUM(CASE WHEN state = 'BUSY' THEN 1 ELSE 0 END) AS busy,
+      SUM(CASE WHEN state = 'DIRTY' THEN 1 ELSE 0 END) AS dirty,
+      SUM(CASE WHEN state = 'BROKEN' THEN 1 ELSE 0 END) AS broken
+    FROM pool_worktrees
+    ${filterClause}
+    GROUP BY nickname
+    ORDER BY nickname ASC
+  `).all(...params) as Array<{
+    nickname: string;
+    total: number;
+    free: number;
+    busy: number;
+    dirty: number;
+    broken: number;
+  }>;
+
+  const byRepoRows = db.prepare(`
+    SELECT
+      nickname,
+      repo_name,
+      COUNT(*) AS total,
+      SUM(CASE WHEN state = 'FREE' THEN 1 ELSE 0 END) AS free,
+      SUM(CASE WHEN state = 'BUSY' THEN 1 ELSE 0 END) AS busy,
+      SUM(CASE WHEN state = 'DIRTY' THEN 1 ELSE 0 END) AS dirty,
+      SUM(CASE WHEN state = 'BROKEN' THEN 1 ELSE 0 END) AS broken
+    FROM pool_worktrees
+    ${filterClause}
+    GROUP BY nickname, repo_name
+    ORDER BY nickname ASC, repo_name ASC
+  `).all(...params) as Array<{
+    nickname: string;
+    repo_name: string;
+    total: number;
+    free: number;
+    busy: number;
+    dirty: number;
+    broken: number;
+  }>;
+
+  return {
+    total: Number(totalRow.total || 0),
+    byState: byStateRows.map(mapSlotStateCount),
+    byNickname: byNicknameRows.map(mapSlotStatsByNickname),
+    byRepo: byRepoRows.map(mapSlotStatsByRepo),
+  };
+}
+
+export function updateSlotState(slotId: string, state: SlotState): SlotRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE slots
+    SET state = ?, updated_at = ?, last_used_at = ?
+    WHERE slot_id = ?
+  `).run(state, timestamp, timestamp, slotId);
+
+  const row = db.prepare(`
+    SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM slots
+    WHERE slot_id = ?
+  `).get(slotId) as {
+    slot_id: string;
+    nickname: string;
+    repo_name: string;
+    slot_path: string;
+    pool_worktree_id: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapSlotRow(row);
+}
+
+export function updatePoolWorktreeState(poolWorktreeId: string, state: SlotState): PoolWorktreeRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE pool_worktrees
+    SET state = ?, updated_at = ?, last_used_at = ?
+    WHERE pool_worktree_id = ?
+  `).run(state, timestamp, timestamp, poolWorktreeId);
+
+  const row = db.prepare(`
+    SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM pool_worktrees
+    WHERE pool_worktree_id = ?
+  `).get(poolWorktreeId) as {
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapPoolWorktreeRow(row);
+}
+
+export function assignPoolWorktree(poolWorktreeId: string, consumerId?: string): PoolWorktreeRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE pool_worktrees
+    SET state = 'BUSY', current_consumer_id = ?, updated_at = ?, last_used_at = ?
+    WHERE pool_worktree_id = ?
+  `).run(consumerId ?? null, timestamp, timestamp, poolWorktreeId);
+
+  const row = db.prepare(`
+    SELECT pool_worktree_id, nickname, repo_name, pool_path, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM pool_worktrees
+    WHERE pool_worktree_id = ?
+  `).get(poolWorktreeId) as {
+    pool_worktree_id: string;
+    nickname: string;
+    repo_name: string;
+    pool_path: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapPoolWorktreeRow(row);
+}
+
+export function clearPoolWorktreeConsumer(poolWorktreeId: string): void {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE pool_worktrees
+    SET current_consumer_id = NULL, updated_at = ?, last_used_at = ?
+    WHERE pool_worktree_id = ?
+  `).run(timestamp, timestamp, poolWorktreeId);
+}
+
+export function assignSlot(slotId: string, consumerId?: string): SlotRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE slots
+    SET state = 'BUSY', current_consumer_id = ?, updated_at = ?, last_used_at = ?
+    WHERE slot_id = ?
+  `).run(consumerId ?? null, timestamp, timestamp, slotId);
+
+  const row = db.prepare(`
+    SELECT slot_id, nickname, repo_name, slot_path, pool_worktree_id, state, current_consumer_id, created_at, updated_at, last_used_at
+    FROM slots
+    WHERE slot_id = ?
+  `).get(slotId) as {
+    slot_id: string;
+    nickname: string;
+    repo_name: string;
+    slot_path: string;
+    pool_worktree_id: string;
+    state: string;
+    current_consumer_id: string | null;
+    created_at: string;
+    updated_at: string;
+    last_used_at: string;
+  };
+  return mapSlotRow(row);
+}
+
+export function addRunSlot(input: {
+  runId: string;
+  slotId: string;
+  repoName: string;
+  poolWorktreeId: string;
+}): RunSlotRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO run_slots (run_id, slot_id, repo_name, pool_worktree_id, created_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(run_id, slot_id) DO UPDATE SET
+      repo_name = excluded.repo_name,
+      pool_worktree_id = excluded.pool_worktree_id
+  `).run(input.runId, input.slotId, input.repoName, input.poolWorktreeId, timestamp);
+
+  const row = db.prepare(`
+    SELECT id, run_id, slot_id, repo_name, pool_worktree_id, created_at
+    FROM run_slots
+    WHERE run_id = ? AND slot_id = ?
+  `).get(input.runId, input.slotId) as {
+    id: number;
+    run_id: string;
+    slot_id: string;
+    repo_name: string;
+    pool_worktree_id: string;
+    created_at: string;
+  };
+  return mapRunSlotRow(row);
+}
+
+export function listRunSlots(runId: string): RunSlotRow[] {
+  const db = openDb();
+  const rows = db.prepare(`
+    SELECT id, run_id, slot_id, repo_name, pool_worktree_id, created_at
+    FROM run_slots
+    WHERE run_id = ?
+    ORDER BY repo_name ASC, slot_id ASC
+  `).all(runId) as Array<{
+    id: number;
+    run_id: string;
+    slot_id: string;
+    repo_name: string;
+    pool_worktree_id: string;
+    created_at: string;
+  }>;
+  return rows.map(mapRunSlotRow);
+}
+
+export function assignConsumerSlot(consumerId: string, slotId: string): ConsumerSlotRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO consumer_slots (consumer_id, slot_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(slot_id) DO UPDATE SET
+      consumer_id = excluded.consumer_id,
+      updated_at = excluded.updated_at
+  `).run(consumerId, slotId, timestamp, timestamp);
+  db.prepare(`
+    UPDATE slots
+    SET current_consumer_id = ?, updated_at = ?, last_used_at = ?
+    WHERE slot_id = ?
+  `).run(consumerId, timestamp, timestamp, slotId);
+
+  const row = db.prepare(`
+    SELECT id, consumer_id, slot_id, created_at, updated_at
+    FROM consumer_slots
+    WHERE slot_id = ?
+  `).get(slotId) as {
+    id: number;
+    consumer_id: string;
+    slot_id: string;
+    created_at: string;
+    updated_at: string;
+  };
+  return mapConsumerSlotRow(row);
+}
+
+export function listConsumerSlots(consumerId: string): ConsumerSlotRow[] {
+  const db = openDb();
+  const rows = db.prepare(`
+    SELECT id, consumer_id, slot_id, created_at, updated_at
+    FROM consumer_slots
+    WHERE consumer_id = ?
+    ORDER BY slot_id ASC
+  `).all(consumerId) as Array<{
+    id: number;
+    consumer_id: string;
+    slot_id: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  return rows.map(mapConsumerSlotRow);
+}
+
+export function clearConsumerSlot(slotId: string): void {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare('DELETE FROM consumer_slots WHERE slot_id = ?').run(slotId);
+  db.prepare(`
+    UPDATE slots
+    SET current_consumer_id = NULL, updated_at = ?, last_used_at = ?
+    WHERE slot_id = ?
+  `).run(timestamp, timestamp, slotId);
+}
+
+export function deletePoolWorktree(poolWorktreeId: string): void {
+  const db = openDb();
+  db.prepare('DELETE FROM pool_worktrees WHERE pool_worktree_id = ?').run(poolWorktreeId);
+}
+
+export function deleteSlot(slotId: string): void {
+  const db = openDb();
+  db.prepare('DELETE FROM slots WHERE slot_id = ?').run(slotId);
 }

@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 function runCli(args: string[]) {
-  return spawnSync('node', ['dist/cli.js', ...args], {
+  return spawnSync('node', ['--import', 'tsx', 'src/cli.ts', ...args], {
     cwd: process.cwd(),
     encoding: 'utf-8',
     env: {
@@ -60,5 +60,85 @@ describe('cli', () => {
 
     expect(result.status).toBe(1);
     expect(String(result.stderr || '')).toContain('Unknown nickname');
+  });
+
+  it('shows slot inspection and stats as json', () => {
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+
+    expect(runCli(['register', 'henon', join(tempDir, 'runs'), '--json']).status).toBe(0);
+    expect(runCli(['add', 'henon', 'henon', repoPath, '--primary', '--json']).status).toBe(0);
+
+    const created = runCli(['new-tree', 'henon', '--consumer', 'agent-9', '--json']);
+    expect(created.status).toBe(0);
+    const createdPayload = JSON.parse(String(created.stdout || '')) as {
+      run: { runId: string };
+      worktrees: Array<{ repoName: string }>;
+    };
+    expect(createdPayload.worktrees).toHaveLength(1);
+
+    const slots = runCli(['list-slots', 'henon', '--json']);
+    expect(slots.status).toBe(0);
+    const slotsPayload = JSON.parse(String(slots.stdout || '')) as {
+      slots: Array<{ slotId: string; state: string }>;
+    };
+    expect(slotsPayload.slots).toHaveLength(1);
+
+    const inspect = runCli(['inspect-slot', slotsPayload.slots[0]!.slotId, '--json']);
+    expect(inspect.status).toBe(0);
+    const inspectPayload = JSON.parse(String(inspect.stdout || '')) as {
+      inspection: {
+        slot: { slotId: string; currentConsumerId: string | null };
+        runs: Array<{ runId: string }>;
+      };
+    };
+    expect(inspectPayload.inspection.slot.currentConsumerId).toBe('agent-9');
+    expect(inspectPayload.inspection.runs[0]?.runId).toBe(createdPayload.run.runId);
+
+    const stats = runCli(['slot-stats', 'henon', '--json']);
+    expect(stats.status).toBe(0);
+    const statsPayload = JSON.parse(String(stats.stdout || '')) as {
+      stats: {
+        total: number;
+        byState: Array<{ state: string; total: number }>;
+      };
+    };
+    expect(statsPayload.stats.total).toBe(1);
+    expect(statsPayload.stats.byState[0]?.state).toBe('BUSY');
+  });
+
+  it('shows pool inspection and pool stats as json', () => {
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+
+    expect(runCli(['register', 'henon', join(tempDir, 'runs'), '--json']).status).toBe(0);
+    expect(runCli(['add', 'henon', 'henon', repoPath, '--primary', '--json']).status).toBe(0);
+    expect(runCli(['new-tree', 'henon', '--consumer', 'agent-10', '--json']).status).toBe(0);
+
+    const pools = runCli(['list-pool-worktrees', 'henon', '--json']);
+    expect(pools.status).toBe(0);
+    const poolsPayload = JSON.parse(String(pools.stdout || '')) as {
+      poolWorktrees: Array<{ poolWorktreeId: string; state: string }>;
+    };
+    expect(poolsPayload.poolWorktrees).toHaveLength(1);
+
+    const inspect = runCli(['inspect-pool-worktree', poolsPayload.poolWorktrees[0]!.poolWorktreeId, '--json']);
+    expect(inspect.status).toBe(0);
+    const inspectPayload = JSON.parse(String(inspect.stdout || '')) as {
+      inspection: {
+        poolWorktree: { currentConsumerId: string | null };
+        slots: Array<{ slotId: string }>;
+      };
+    };
+    expect(inspectPayload.inspection.poolWorktree.currentConsumerId).toBe('agent-10');
+    expect(inspectPayload.inspection.slots).toHaveLength(1);
+
+    const stats = runCli(['pool-stats', 'henon', '--json']);
+    expect(stats.status).toBe(0);
+    const statsPayload = JSON.parse(String(stats.stdout || '')) as {
+      stats: { total: number; byState: Array<{ state: string; total: number }> };
+    };
+    expect(statsPayload.stats.total).toBe(1);
+    expect(statsPayload.stats.byState[0]?.state).toBe('BUSY');
   });
 });
