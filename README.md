@@ -2,6 +2,11 @@
 
 Small CLI for managing groups of related repositories and transient multi-repo run workspaces.
 
+## Repositories
+
+- Main repo: <https://github.com/guilhermesilveira/worktree-manager>
+- Smoke-test repo: <https://github.com/guilhermesilveira/worktree-manager-test>
+
 Current feature set:
 
 - register a project nickname and its run base directory
@@ -20,6 +25,27 @@ Current feature set:
 ```bash
 npm install
 npm run build
+```
+
+Global local install for experimentation:
+
+```bash
+npm link
+worktree-manager --help
+```
+
+After local changes, refresh the linked command with:
+
+```bash
+npm run build
+npm link
+```
+
+The project is currently public on GitHub, but it is not published on the npm registry.
+If you later want to publish it to npm, remove `"private": true` from `package.json`, choose an available package name, run `npm login`, and then:
+
+```bash
+npm publish --access public
 ```
 
 Run locally during development:
