@@ -17,8 +17,19 @@ export interface RepositoryRow {
   updatedAt: string;
 }
 
-export type RunStatus = 'ACTIVE' | 'PUSHED' | 'FAILED' | 'PURGED';
+export type RunStatus = 'ACTIVE' | 'PUSHED' | 'FAILED' | 'RELEASED' | 'PURGED';
 export type SlotState = 'FREE' | 'BUSY' | 'DIRTY' | 'BROKEN';
+export type RunEventLevel = 'INFO' | 'WARN' | 'ERROR';
+
+export interface RunEventRow {
+  id: number;
+  runId: string;
+  eventType: string;
+  level: RunEventLevel;
+  message: string;
+  payloadJson: string | null;
+  createdAt: string;
+}
 
 export interface RunRow {
   runId: string;
@@ -28,6 +39,15 @@ export interface RunRow {
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
+}
+
+export interface RunListItem extends RunRow {
+  repoCount: number;
+  eventCount: number;
+  latestEventType: string | null;
+  latestEventLevel: RunEventLevel | null;
+  latestEventMessage: string | null;
+  latestEventAt: string | null;
 }
 
 export interface RunWorktreeRow {
@@ -40,6 +60,17 @@ export interface RunWorktreeRow {
   isPrimary: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RunInspectionWorktree extends RunWorktreeRow {
+  slot: SlotRow | null;
+  poolWorktree: PoolWorktreeRow | null;
+}
+
+export interface RunInspection {
+  run: RunRow;
+  worktrees: RunInspectionWorktree[];
+  events: RunEventRow[];
 }
 
 export interface SlotRow {

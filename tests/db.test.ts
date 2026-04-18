@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { addRunSlot, addRunWorktree, assignConsumerSlot, createPoolWorktree, createRun, createSlot, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listSlots, listStaleFreePoolWorktrees, upsertProject, upsertRepository } from '../src/db.js';
+import { addRunEvent, addRunSlot, addRunWorktree, assignConsumerSlot, createPoolWorktree, createRun, createSlot, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectRun, inspectSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunSummaries, listSlots, listStaleFreePoolWorktrees, upsertProject, upsertRepository } from '../src/db.js';
 import { makeTempDir, removeTempDir } from './testUtils.js';
 
 let tempDir = '';
@@ -243,5 +243,70 @@ describe('db', () => {
     expect(stats.byNickname[0]?.busy).toBe(1);
     expect(stats.byNickname[0]?.free).toBe(1);
     expect(stale.map((entry) => entry.poolWorktreeId)).toEqual(['pool-002']);
+  });
+
+  it('stores run lifecycle events and exposes run inspection summaries', () => {
+    upsertProject('henon', '/tmp/runs/henon');
+    createRun({
+      runId: 'run-123',
+      nickname: 'henon',
+      workspaceRoot: '/tmp/runs/henon/run-123',
+    });
+    createPoolWorktree({
+      poolWorktreeId: 'pool-001',
+      nickname: 'henon',
+      repoName: 'henon',
+      poolPath: '/tmp/pool/henon/pool-001',
+      state: 'BUSY',
+      currentConsumerId: 'agent-7',
+    });
+    createSlot({
+      slotId: 'slot-001',
+      nickname: 'henon',
+      repoName: 'henon',
+      slotPath: '/tmp/runs/henon/run-123/repos/henon',
+      poolWorktreeId: 'pool-001',
+      state: 'BUSY',
+      currentConsumerId: 'agent-7',
+    });
+    addRunSlot({
+      runId: 'run-123',
+      slotId: 'slot-001',
+      repoName: 'henon',
+      poolWorktreeId: 'pool-001',
+    });
+    addRunWorktree({
+      runId: 'run-123',
+      repoName: 'henon',
+      worktreePath: '/tmp/runs/henon/run-123/repos/henon',
+      branchName: 'wt/run-123-henon',
+      poolWorktreeId: 'pool-001',
+      isPrimary: true,
+    });
+    addRunEvent({
+      runId: 'run-123',
+      eventType: 'RUN_CREATED',
+      message: 'Allocated 1 writable repo',
+    });
+    addRunEvent({
+      runId: 'run-123',
+      eventType: 'RUN_RETAINED',
+      level: 'WARN',
+      message: 'Merge conflict kept the run for recovery',
+      payloadJson: JSON.stringify({ repoName: 'henon' }),
+    });
+
+    const summaries = listRunSummaries('henon');
+    const inspection = inspectRun('run-123');
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.repoCount).toBe(1);
+    expect(summaries[0]?.eventCount).toBe(2);
+    expect(summaries[0]?.latestEventType).toBe('RUN_RETAINED');
+    expect(summaries[0]?.latestEventLevel).toBe('WARN');
+    expect(inspection?.worktrees[0]?.slot?.slotId).toBe('slot-001');
+    expect(inspection?.worktrees[0]?.poolWorktree?.poolWorktreeId).toBe('pool-001');
+    expect(inspection?.events.map((event) => event.eventType)).toEqual(['RUN_CREATED', 'RUN_RETAINED']);
+    expect(inspection?.events[1]?.payloadJson).toBe(JSON.stringify({ repoName: 'henon' }));
   });
 });

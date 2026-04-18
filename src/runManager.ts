@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { addRunSlot, addRunWorktree, assignConsumerSlot, clearConsumerSlot, clearPoolWorktreeConsumer, createPoolWorktree, createRun, createSlot, deletePoolWorktree, deleteRun, deleteSlot, findReusablePoolWorktree, getPrimaryRepository, getProject, getPoolWorktree, getRepository, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunWorktrees, listRuns, listStaleFreePoolWorktrees, updatePoolWorktreeState, updateRunStatus, updateSlotState, assignPoolWorktree } from './db.js';
+import { addRunEvent, addRunSlot, addRunWorktree, assignConsumerSlot, clearConsumerSlot, clearPoolWorktreeConsumer, createPoolWorktree, createRun, createSlot, deletePoolWorktree, deleteRun, deleteSlot, findReusablePoolWorktree, getPrimaryRepository, getProject, getPoolWorktree, getRepository, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunWorktrees, listRuns, listStaleFreePoolWorktrees, updatePoolWorktreeState, updateRunStatus, updateSlotState, assignPoolWorktree } from './db.js';
 import { assertGitRepo, gitBranchExistsOnRemote, gitCommitAll, gitDeleteBranchIfExists, gitHasAnyChanges, gitHasUncommittedChanges, gitPrepareWorktreeForRun, gitPushHeadToBranch, gitRebaseOntoRemoteBranch, gitResetWorktreeToDefault, gitWorktreeAddDetached, gitWorktreePrune, gitWorktreeRemove } from './git.js';
 import type { CleanupConsumerResult, CleanupSlotResult, GcPoolResult, PoolWorktreeRow, PushTreeRepoResult, PushTreeResult, ReleaseTreeResult, RepositoryRow, RunRow, RunWorktreeRow, SlotRow, SlotState } from './types.js';
 
@@ -36,6 +36,16 @@ function manifestPath(workspaceRoot: string): string {
 
 function writeRunManifest(run: RunRow, worktrees: RunWorktreeRow[]): void {
   writeFileSync(manifestPath(run.workspaceRoot), `${JSON.stringify({ run, worktrees }, null, 2)}\n`, 'utf-8');
+}
+
+function recordRunEvent(runId: string, eventType: string, message: string, payload?: unknown, level: 'INFO' | 'WARN' | 'ERROR' = 'INFO'): void {
+  addRunEvent({
+    runId,
+    eventType,
+    level,
+    message,
+    payloadJson: payload === undefined ? null : JSON.stringify(payload),
+  });
 }
 
 function slotPathForRun(workspaceRoot: string, repoName: string): string {
@@ -218,10 +228,15 @@ export function createNewTree(nickname: string, selectedRepoNames: string[], con
 
   try {
     const worktrees = selectedRepositories.map((repository) => createRunSlotForRepository(run, repository, consumerId).worktree);
+    recordRunEvent(run.runId, 'RUN_CREATED', `Allocated ${worktrees.length} writable repo(s)`, {
+      consumerId: consumerId || null,
+      repositories: worktrees.map((worktree) => ({ repoName: worktree.repoName, branchName: worktree.branchName, poolWorktreeId: worktree.poolWorktreeId })),
+    });
     writeRunManifest(run, worktrees);
     return { run, worktrees };
   } catch (error: unknown) {
     updateRunStatus(run.runId, 'FAILED');
+    recordRunEvent(run.runId, 'RUN_CREATE_FAILED', String(error instanceof Error ? error.message : error), undefined, 'ERROR');
     throw error;
   }
 }
@@ -233,6 +248,11 @@ export function promoteRunRepository(runId: string, repoName: string, consumerId
   }
   const existing = getRunWorktree(runId, repoName);
   if (existing) {
+    recordRunEvent(run.runId, 'RUN_PROMOTE_SKIPPED', `Writable repo ${repoName} was already attached`, {
+      repoName,
+      branchName: existing.branchName,
+      poolWorktreeId: existing.poolWorktreeId,
+    });
     return { run, worktree: existing };
   }
   const repository = getRepository(run.nickname, repoName);
@@ -240,6 +260,12 @@ export function promoteRunRepository(runId: string, repoName: string, consumerId
     throw new Error(`Unknown repository ${repoName} for nickname ${run.nickname}`);
   }
   const { worktree } = createRunSlotForRepository(run, repository, consumerId);
+  recordRunEvent(run.runId, 'RUN_PROMOTED', `Promoted ${repoName} into this run`, {
+    consumerId: consumerId || null,
+    repoName: worktree.repoName,
+    branchName: worktree.branchName,
+    poolWorktreeId: worktree.poolWorktreeId,
+  });
   writeRunManifest(run, listRunWorktrees(runId));
   return { run, worktree };
 }
@@ -263,7 +289,13 @@ export function releaseRunTree(runId: string, cleanup = false): ReleaseTreeResul
       : releaseAssignedPoolWithoutCleanup(slot, poolWorktree);
   });
 
-  return { run, slots };
+  const releasedRun = updateRunStatus(runId, 'RELEASED');
+  recordRunEvent(runId, cleanup ? 'RUN_RELEASED_CLEAN' : 'RUN_RELEASED', `Released ${slots.length} slot(s)`, {
+    cleanup,
+    slots,
+  }, slots.some((slot) => slot.state !== 'FREE') ? 'WARN' : 'INFO');
+
+  return { run: releasedRun, slots };
 }
 
 export function cleanupOneSlot(slotId: string): CleanupSlotResult {
@@ -335,13 +367,21 @@ export function pushRunTree(runId: string): PushTreeResult {
         commitCreated,
         pushed,
       });
+      recordRunEvent(runId, 'RUN_PUSH_REPOSITORY', `Pushed ${worktree.repoName} to ${worktree.branchName}`, {
+        repoName: worktree.repoName,
+        branchName: worktree.branchName,
+        commitCreated,
+        pushed,
+      });
     }
 
     const pushedRun = updateRunStatus(runId, 'PUSHED');
+    recordRunEvent(runId, 'RUN_PUSHED', `Pushed ${results.length} repo branch(es)`, { repositories: results });
     writeRunManifest(pushedRun, worktrees);
     return { run: pushedRun, repositories: results };
   } catch (error: unknown) {
     const failedRun = updateRunStatus(runId, 'FAILED');
+    recordRunEvent(runId, 'RUN_PUSH_FAILED', String(error instanceof Error ? error.message : error), undefined, 'ERROR');
     writeRunManifest(failedRun, worktrees);
     throw error;
   }

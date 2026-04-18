@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { resolveAppDir, resolveDatabasePath } from './paths.js';
-import type { ConsumerSlotRow, PoolStats, PoolWorktreeInspection, PoolWorktreeInspectionRun, PoolWorktreeInspectionSlot, PoolWorktreeRow, ProjectRow, RepositoryRow, RunRow, RunSlotRow, RunStatus, RunWorktreeRow, SlotInspection, SlotInspectionRun, SlotRow, SlotState, SlotStats, SlotStatsByNickname, SlotStatsByRepo, SlotStateCount } from './types.js';
+import type { ConsumerSlotRow, PoolStats, PoolWorktreeInspection, PoolWorktreeInspectionRun, PoolWorktreeInspectionSlot, PoolWorktreeRow, ProjectRow, RepositoryRow, RunEventLevel, RunEventRow, RunInspection, RunInspectionWorktree, RunListItem, RunRow, RunSlotRow, RunStatus, RunWorktreeRow, SlotInspection, SlotInspectionRun, SlotRow, SlotState, SlotStats, SlotStatsByNickname, SlotStatsByRepo, SlotStateCount } from './types.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -61,6 +61,38 @@ function mapRunRow(row: {
   };
 }
 
+function mapRunListItem(row: {
+  run_id: string;
+  nickname: string;
+  workspace_root: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  repo_count: number;
+  event_count: number;
+  latest_event_type: string | null;
+  latest_event_level: string | null;
+  latest_event_message: string | null;
+  latest_event_at: string | null;
+}): RunListItem {
+  return {
+    runId: row.run_id,
+    nickname: row.nickname,
+    workspaceRoot: row.workspace_root,
+    status: row.status as RunStatus,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    finishedAt: row.finished_at,
+    repoCount: Number(row.repo_count || 0),
+    eventCount: Number(row.event_count || 0),
+    latestEventType: row.latest_event_type,
+    latestEventLevel: row.latest_event_level as RunEventLevel | null,
+    latestEventMessage: row.latest_event_message,
+    latestEventAt: row.latest_event_at,
+  };
+}
+
 function mapRunWorktreeRow(row: {
   id: number;
   run_id: string;
@@ -82,6 +114,26 @@ function mapRunWorktreeRow(row: {
     isPrimary: row.is_primary === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapRunEventRow(row: {
+  id: number;
+  run_id: string;
+  event_type: string;
+  level: string;
+  message: string;
+  payload_json: string | null;
+  created_at: string;
+}): RunEventRow {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    eventType: row.event_type,
+    level: row.level as RunEventLevel,
+    message: row.message,
+    payloadJson: row.payload_json,
+    createdAt: row.created_at,
   };
 }
 
@@ -333,6 +385,17 @@ function openDb(): DatabaseSync {
       updated_at TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
       FOREIGN KEY(nickname) REFERENCES projects(nickname) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS run_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      level TEXT NOT NULL,
+      message TEXT NOT NULL,
+      payload_json TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     );
   `);
 
@@ -598,6 +661,110 @@ export function listRuns(nickname?: string): RunRow[] {
   }>).map(mapRunRow);
 }
 
+export function listRunSummaries(nickname?: string): RunListItem[] {
+  const db = openDb();
+  const rows = nickname
+    ? db.prepare(`
+        SELECT
+          runs.run_id,
+          runs.nickname,
+          runs.workspace_root,
+          runs.status,
+          runs.created_at,
+          runs.updated_at,
+          runs.finished_at,
+          COUNT(DISTINCT run_worktrees.id) AS repo_count,
+          COUNT(DISTINCT run_events.id) AS event_count,
+          (
+            SELECT event_type FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_type,
+          (
+            SELECT level FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_level,
+          (
+            SELECT message FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_message,
+          (
+            SELECT created_at FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_at
+        FROM runs
+        LEFT JOIN run_worktrees ON run_worktrees.run_id = runs.run_id
+        LEFT JOIN run_events ON run_events.run_id = runs.run_id
+        WHERE runs.nickname = ?
+        GROUP BY runs.run_id
+        ORDER BY runs.created_at DESC
+      `).all(nickname)
+    : db.prepare(`
+        SELECT
+          runs.run_id,
+          runs.nickname,
+          runs.workspace_root,
+          runs.status,
+          runs.created_at,
+          runs.updated_at,
+          runs.finished_at,
+          COUNT(DISTINCT run_worktrees.id) AS repo_count,
+          COUNT(DISTINCT run_events.id) AS event_count,
+          (
+            SELECT event_type FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_type,
+          (
+            SELECT level FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_level,
+          (
+            SELECT message FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_message,
+          (
+            SELECT created_at FROM run_events re
+            WHERE re.run_id = runs.run_id
+            ORDER BY re.created_at DESC, re.id DESC
+            LIMIT 1
+          ) AS latest_event_at
+        FROM runs
+        LEFT JOIN run_worktrees ON run_worktrees.run_id = runs.run_id
+        LEFT JOIN run_events ON run_events.run_id = runs.run_id
+        GROUP BY runs.run_id
+        ORDER BY runs.created_at DESC
+      `).all();
+
+  return (rows as Array<{
+    run_id: string;
+    nickname: string;
+    workspace_root: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+    finished_at: string | null;
+    repo_count: number;
+    event_count: number;
+    latest_event_type: string | null;
+    latest_event_level: string | null;
+    latest_event_message: string | null;
+    latest_event_at: string | null;
+  }>).map(mapRunListItem);
+}
+
 export function updateRunStatus(runId: string, status: RunStatus): RunRow {
   const db = openDb();
   const timestamp = nowIso();
@@ -622,6 +789,61 @@ export function updateRunStatus(runId: string, status: RunStatus): RunRow {
     finished_at: string | null;
   };
   return mapRunRow(row);
+}
+
+export function addRunEvent(input: {
+  runId: string;
+  eventType: string;
+  level?: RunEventLevel;
+  message: string;
+  payloadJson?: string | null;
+}): RunEventRow {
+  const db = openDb();
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO run_events (run_id, event_type, level, message, payload_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    input.runId,
+    input.eventType,
+    input.level || 'INFO',
+    input.message,
+    input.payloadJson || null,
+    timestamp,
+  );
+  const row = db.prepare(`
+    SELECT id, run_id, event_type, level, message, payload_json, created_at
+    FROM run_events
+    WHERE id = last_insert_rowid()
+  `).get() as {
+    id: number;
+    run_id: string;
+    event_type: string;
+    level: string;
+    message: string;
+    payload_json: string | null;
+    created_at: string;
+  };
+  return mapRunEventRow(row);
+}
+
+export function listRunEvents(runId: string): RunEventRow[] {
+  const db = openDb();
+  const rows = db.prepare(`
+    SELECT id, run_id, event_type, level, message, payload_json, created_at
+    FROM run_events
+    WHERE run_id = ?
+    ORDER BY created_at ASC, id ASC
+  `).all(runId) as Array<{
+    id: number;
+    run_id: string;
+    event_type: string;
+    level: string;
+    message: string;
+    payload_json: string | null;
+    created_at: string;
+  }>;
+  return rows.map(mapRunEventRow);
 }
 
 export function addRunWorktree(input: {
@@ -720,6 +942,23 @@ export function listRunWorktrees(runId: string): RunWorktreeRow[] {
     updated_at: string;
   }>;
   return rows.map(mapRunWorktreeRow);
+}
+
+export function inspectRun(runId: string): RunInspection | null {
+  const run = getRun(runId);
+  if (!run) return null;
+  const worktrees = listRunWorktrees(runId).map((worktree): RunInspectionWorktree => {
+    const runSlot = listRunSlots(runId).find((entry) => entry.repoName === worktree.repoName);
+    const slot = runSlot ? getSlot(runSlot.slotId) : null;
+    const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+    return {
+      ...worktree,
+      slot,
+      poolWorktree,
+    };
+  });
+  const events = listRunEvents(runId);
+  return { run, worktrees, events };
 }
 
 export function deleteRun(runId: string): void {

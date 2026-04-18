@@ -141,4 +141,48 @@ describe('cli', () => {
     expect(statsPayload.stats.total).toBe(1);
     expect(statsPayload.stats.byState[0]?.state).toBe('BUSY');
   });
+
+  it('shows run inspection, run summaries, and db-backed notes as json', () => {
+    const mainRepoPath = join(tempDir, 'henon');
+    const secondaryRepoPath = join(tempDir, 'henon-pub02');
+    initGitRepo(mainRepoPath, { 'README.md': '# henon\n' });
+    initGitRepo(secondaryRepoPath, { 'README.md': '# henon-pub02\n' });
+
+    expect(runCli(['register', 'henon', join(tempDir, 'runs'), '--json']).status).toBe(0);
+    expect(runCli(['add', 'henon', 'henon', mainRepoPath, '--primary', '--json']).status).toBe(0);
+    expect(runCli(['add', 'henon', 'henon-pub02', secondaryRepoPath, '--json']).status).toBe(0);
+
+    const created = runCli(['new-tree', 'henon', '--consumer', 'agent-11', '--json']);
+    expect(created.status).toBe(0);
+    const createdPayload = JSON.parse(String(created.stdout || '')) as {
+      run: { runId: string };
+    };
+    expect(runCli(['promote', createdPayload.run.runId, 'henon-pub02', '--consumer', 'agent-11', '--json']).status).toBe(0);
+    expect(runCli(['note-run', createdPayload.run.runId, 'RUN_RETAINED', 'Kept for manual merge recovery', '--level', 'WARN', '--payload-json', '{"repoName":"henon-pub02"}', '--json']).status).toBe(0);
+
+    const listRuns = runCli(['list-runs', 'henon', '--json']);
+    expect(listRuns.status).toBe(0);
+    const listRunsPayload = JSON.parse(String(listRuns.stdout || '')) as {
+      runs: Array<{ runId: string; repoCount: number; latestEventType: string | null; latestEventLevel: string | null }>;
+    };
+    expect(listRunsPayload.runs).toHaveLength(1);
+    expect(listRunsPayload.runs[0]?.runId).toBe(createdPayload.run.runId);
+    expect(listRunsPayload.runs[0]?.repoCount).toBe(2);
+    expect(listRunsPayload.runs[0]?.latestEventType).toBe('RUN_RETAINED');
+    expect(listRunsPayload.runs[0]?.latestEventLevel).toBe('WARN');
+
+    const inspectRun = runCli(['inspect-run', createdPayload.run.runId, '--json']);
+    expect(inspectRun.status).toBe(0);
+    const inspectPayload = JSON.parse(String(inspectRun.stdout || '')) as {
+      inspection: {
+        worktrees: Array<{ repoName: string; slot: { slotId: string } | null; poolWorktree: { poolWorktreeId: string } | null }>;
+        events: Array<{ eventType: string; level: string; message: string; payloadJson: string | null }>;
+      };
+    };
+    expect(inspectPayload.inspection.worktrees).toHaveLength(2);
+    expect(inspectPayload.inspection.worktrees.every((worktree) => worktree.slot && worktree.poolWorktree)).toBe(true);
+    expect(inspectPayload.inspection.events.at(-1)?.eventType).toBe('RUN_RETAINED');
+    expect(inspectPayload.inspection.events.at(-1)?.level).toBe('WARN');
+    expect(inspectPayload.inspection.events.at(-1)?.payloadJson).toBe('{"repoName":"henon-pub02"}');
+  });
 });

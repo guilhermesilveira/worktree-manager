@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 
 import { Command } from 'commander';
 
-import { getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectSlot, listPoolWorktrees, listRepositories, listSlots, upsertProject, upsertRepository } from './db.js';
+import { addRunEvent, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectRun, inspectSlot, listPoolWorktrees, listRepositories, listRunSummaries, listSlots, upsertProject, upsertRepository } from './db.js';
 import { assertGitRepo, detectDefaultBranch, detectRemoteUrl } from './git.js';
 import { resolveAbsolutePath, resolveDatabasePath } from './paths.js';
 import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
@@ -115,6 +115,51 @@ program
     }
     for (const repository of repositories) {
       process.stdout.write(`${repository.name}\t${repository.localPath}\t${repository.defaultBranch}${repository.isPrimary ? '\tprimary' : ''}\n`);
+    }
+  });
+
+program
+  .command('list-runs')
+  .description('List stored runs with repo counts and latest lifecycle event')
+  .argument('[nickname]')
+  .option('--json', 'Emit JSON output')
+  .action((nicknameArg: string | undefined, options: { json?: boolean }) => {
+    const nickname = String(nicknameArg || '').trim() || undefined;
+    const runs = listRunSummaries(nickname);
+    if (options.json) {
+      writeJson({ runs, dbPath: resolveDatabasePath() });
+      return;
+    }
+    if (runs.length === 0) {
+      process.stdout.write(`${nickname || 'all'}: no runs\n`);
+      return;
+    }
+    for (const run of runs) {
+      process.stdout.write(`${run.runId}\t${run.nickname}\t${run.status}\trepos=${run.repoCount}\tevents=${run.eventCount}\tlatest=${run.latestEventType || '-'}\t${run.workspaceRoot}\n`);
+    }
+  });
+
+program
+  .command('inspect-run')
+  .description('Show one run with its writable repos, slots, pooled worktrees, and lifecycle events')
+  .argument('<runId>')
+  .option('--json', 'Emit JSON output')
+  .action((runIdArg: string, options: { json?: boolean }) => {
+    const runId = requiredText(runIdArg, 'runId');
+    const inspection = inspectRun(runId);
+    if (!inspection) {
+      throw new Error(`Unknown run: ${runId}`);
+    }
+    if (options.json) {
+      writeJson({ inspection, dbPath: resolveDatabasePath() });
+      return;
+    }
+    process.stdout.write(`${inspection.run.runId}\t${inspection.run.nickname}\t${inspection.run.status}\t${inspection.run.workspaceRoot}\n`);
+    for (const worktree of inspection.worktrees) {
+      process.stdout.write(`repo\t${worktree.repoName}\tbranch=${worktree.branchName}\tslot=${worktree.slot?.slotId || '-'}\tpool=${worktree.poolWorktree?.poolWorktreeId || '-'}\t${worktree.worktreePath}\n`);
+    }
+    for (const event of inspection.events) {
+      process.stdout.write(`event\t${event.createdAt}\t${event.level}\t${event.eventType}\t${event.message}\n`);
     }
   });
 
@@ -354,6 +399,46 @@ program
     for (const slot of result.slots) {
       process.stdout.write(`${slot.slotId}\t${slot.repoName}\t${slot.state}\t${slot.slotPath}\n`);
     }
+  });
+
+program
+  .command('note-run')
+  .description('Store a DB-backed lifecycle note for one run')
+  .argument('<runId>')
+  .argument('<eventType>')
+  .argument('<message>')
+  .option('--level <level>', 'INFO, WARN, or ERROR')
+  .option('--payload-json <json>', 'Optional JSON payload to store with the note')
+  .option('--json', 'Emit JSON output')
+  .action((runIdArg: string, eventTypeArg: string, messageArg: string, options: {
+    level?: string;
+    payloadJson?: string;
+    json?: boolean;
+  }) => {
+    const runId = requiredText(runIdArg, 'runId');
+    const eventType = requiredText(eventTypeArg, 'eventType');
+    const message = requiredText(messageArg, 'message');
+    const level = String(options.level || 'INFO').trim().toUpperCase();
+    if (!['INFO', 'WARN', 'ERROR'].includes(level)) {
+      throw new Error(`Invalid level: ${level}`);
+    }
+    let payloadJson: string | null = null;
+    if (String(options.payloadJson || '').trim()) {
+      JSON.parse(String(options.payloadJson));
+      payloadJson = String(options.payloadJson);
+    }
+    const event = addRunEvent({
+      runId,
+      eventType,
+      level: level as 'INFO' | 'WARN' | 'ERROR',
+      message,
+      payloadJson,
+    });
+    if (options.json) {
+      writeJson({ event, dbPath: resolveDatabasePath() });
+      return;
+    }
+    process.stdout.write(`${event.runId}\t${event.level}\t${event.eventType}\t${event.message}\n`);
   });
 
 program
