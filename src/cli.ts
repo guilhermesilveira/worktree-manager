@@ -7,7 +7,7 @@ import { Command } from 'commander';
 import { addRunEvent, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectRun, inspectSlot, listPoolWorktrees, listRepositories, listRunSummaries, listSlots, upsertProject, upsertRepository } from './db.js';
 import { assertGitRepo, detectDefaultBranch, detectRemoteUrl } from './git.js';
 import { resolveAbsolutePath, resolveDatabasePath } from './paths.js';
-import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
+import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
 import { searchAcrossRepos } from './search.js';
 
 function requiredText(value: string, label: string): string {
@@ -25,7 +25,7 @@ const program = new Command();
 program
   .name('worktree-manager')
   .description('Manage related repositories and transient multi-repo worktree flows.')
-  .version('0.2.0');
+  .version('0.2.1');
 
 program
   .command('register')
@@ -458,14 +458,32 @@ program
 
 program
   .command('cleanup-consumer')
-  .description('Reset every slot currently assigned to one consumer/agent')
+  .description('Release runs currently assigned to one consumer/agent')
   .argument('<consumerId>')
+  .option('--safe', 'Only release runs whose worktrees are clean and already represented remotely')
+  .option('--force', 'Release runs without remote safety checks')
+  .option('--slots-only', 'Legacy behavior: reset assigned slots directly without updating run lifecycle state')
   .option('--json', 'Emit JSON output')
-  .action((consumerIdArg: string, options: { json?: boolean }) => {
+  .action((consumerIdArg: string, options: { safe?: boolean; force?: boolean; slotsOnly?: boolean; json?: boolean }) => {
     const consumerId = requiredText(consumerIdArg, 'consumerId');
-    const result = cleanupConsumerSlots(consumerId);
+    if (!options.slotsOnly && !options.safe && !options.force) {
+      throw new Error('cleanup-consumer requires --safe or --force');
+    }
+    const result = options.slotsOnly
+      ? cleanupConsumerSlots(consumerId)
+      : cleanupConsumerRuns(consumerId, options.safe === true);
     if (options.json) {
       writeJson(result);
+      return;
+    }
+    if ('released' in result) {
+      process.stdout.write(`${result.consumerId}\treleased=${result.released.length}\tskipped=${result.skipped.length}\tsafe=${result.safe}\n`);
+      for (const releasedRun of result.released) {
+        process.stdout.write(`released\t${releasedRun.runId}\t${releasedRun.status}\tslots=${releasedRun.slots.length}\n`);
+      }
+      for (const skippedRun of result.skipped) {
+        process.stdout.write(`skipped\t${skippedRun.runId}\t${skippedRun.status}\t${skippedRun.reason}\n`);
+      }
       return;
     }
     process.stdout.write(`${result.consumerId}\tslots=${result.slots.length}\n`);

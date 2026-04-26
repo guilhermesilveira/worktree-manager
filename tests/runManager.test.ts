@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { createRun, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRuns, listRunSlots, listRunWorktrees, listSlots, updateRunStatus, upsertProject, upsertRepository } from '../src/db.js';
-import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
+import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
 import { makeTempDir, removeTempDir, initGitRepo, writeFile } from './testUtils.js';
 
 let tempDir = '';
@@ -281,6 +281,42 @@ describe('runManager', () => {
     expect(cleaned.slots).toHaveLength(1);
     expect(cleaned.slots[0]?.state).toBe('FREE');
     expect(listConsumerSlots('agent-55')).toHaveLength(0);
+  });
+
+  it('cleanup-consumer safe mode releases only remotely represented clean runs', () => {
+    const baseDir = join(tempDir, 'runs');
+    const barePath = join(tempDir, 'origin.git');
+    const seedRepo = join(tempDir, 'seed');
+    initGitRepo(seedRepo, { 'README.md': '# henon\n' });
+    run('git', ['init', '--bare', barePath], tempDir);
+    run('git', ['remote', 'add', 'origin', barePath], seedRepo);
+    run('git', ['push', '-u', 'origin', 'main'], seedRepo);
+    run('git', ['remote', 'set-head', 'origin', 'main'], seedRepo);
+
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: seedRepo,
+      remoteUrl: barePath,
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    const cleanRun = createNewTree('henon', [], 'agent-safe');
+    const dirtyRun = createNewTree('henon', [], 'agent-safe');
+    writeFile(join(dirtyRun.worktrees[0]!.worktreePath, 'temp.txt'), 'leftover\n');
+
+    const cleaned = cleanupConsumerRuns('agent-safe', true);
+
+    expect(cleaned.safe).toBe(true);
+    expect(cleaned.released.map((entry) => entry.runId)).toEqual([cleanRun.run.runId]);
+    expect(cleaned.skipped).toHaveLength(1);
+    expect(cleaned.skipped[0]?.runId).toBe(dirtyRun.run.runId);
+    expect(cleaned.skipped[0]?.reason).toContain('uncommitted changes');
+    expect(getRun(cleanRun.run.runId)?.status).toBe('RELEASED');
+    expect(getRun(dirtyRun.run.runId)?.status).toBe('ACTIVE');
+    expect(listConsumerSlots('agent-safe')).toHaveLength(1);
   });
 
   it('cleanup-slot marks a slot free when reset succeeds', () => {

@@ -72,6 +72,7 @@ node dist/cli.js search henon "kneading"
 node dist/cli.js new-tree henon --json
 node dist/cli.js promote run-... henon-pub02 --json
 node dist/cli.js push-tree run-... --json
+node dist/cli.js cleanup-consumer agent-... --safe --json
 node dist/cli.js purge-failed henon --json
 ```
 
@@ -89,6 +90,10 @@ This keeps the tool independent from ResearchUI for now.
 
 `push-tree` pushes to per-run branches such as `wt/run-...-repo`, not to the repository's default branch.
 That leaves the later merge/integration step to the caller or worker layer.
+
+`cleanup-consumer <consumerId> --safe` is intended for orchestrators that know a consumer/agent is no longer alive.
+In safe mode, it releases only runs whose worktrees are clean and whose `HEAD` is already contained in the run branch or default remote branch.
+Use `--force` only when the caller has independently verified that the consumer's work can be discarded.
 
 For tests or isolated runs, you can override the app directory:
 

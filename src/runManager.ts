@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { addRunEvent, addRunSlot, addRunWorktree, assignConsumerSlot, clearConsumerSlot, clearPoolWorktreeConsumer, createPoolWorktree, createRun, createSlot, deletePoolWorktree, deleteRun, deleteSlot, findReusablePoolWorktree, getPrimaryRepository, getProject, getPoolWorktree, getRepository, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunWorktrees, listRuns, listStaleFreePoolWorktrees, updatePoolWorktreeState, updateRunStatus, updateSlotState, assignPoolWorktree } from './db.js';
-import { assertGitRepo, gitBranchExistsOnRemote, gitCommitAll, gitDeleteBranchIfExists, gitHasAnyChanges, gitHasUncommittedChanges, gitPrepareWorktreeForRun, gitPushHeadToBranch, gitRebaseOntoRemoteBranch, gitResetWorktreeToDefault, gitWorktreeAddDetached, gitWorktreePrune, gitWorktreeRemove } from './git.js';
-import type { CleanupConsumerResult, CleanupSlotResult, GcPoolResult, PoolWorktreeRow, PushTreeRepoResult, PushTreeResult, ReleaseTreeResult, RepositoryRow, RunRow, RunWorktreeRow, SlotRow, SlotState } from './types.js';
+import { addRunEvent, addRunSlot, addRunWorktree, assignConsumerSlot, clearConsumerSlot, clearPoolWorktreeConsumer, createPoolWorktree, createRun, createSlot, deletePoolWorktree, deleteRun, deleteSlot, findReusablePoolWorktree, getPrimaryRepository, getProject, getPoolWorktree, getRepository, getRun, getRunWorktree, getSlot, inspectSlot, listConsumerSlots, listPoolWorktrees, listRepositories, listRunSlots, listRunWorktrees, listRuns, listStaleFreePoolWorktrees, updatePoolWorktreeState, updateRunStatus, updateSlotState, assignPoolWorktree } from './db.js';
+import { assertGitRepo, gitBranchExistsOnRemote, gitCommitAll, gitDeleteBranchIfExists, gitHasAnyChanges, gitHasUncommittedChanges, gitPrepareWorktreeForRun, gitPushHeadToBranch, gitRebaseOntoRemoteBranch, gitResetWorktreeToDefault, gitSafeToRelease, gitWorktreeAddDetached, gitWorktreePrune, gitWorktreeRemove } from './git.js';
+import type { CleanupConsumerResult, CleanupConsumerRunsResult, CleanupSlotResult, GcPoolResult, PoolWorktreeRow, PushTreeRepoResult, PushTreeResult, ReleaseTreeResult, RepositoryRow, RunRow, RunWorktreeRow, SlotRow, SlotState } from './types.js';
 
 function sanitizeSegment(value: string): string {
   return String(value || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repo';
@@ -348,6 +348,61 @@ export function cleanupConsumerSlots(consumerId: string): CleanupConsumerResult 
   const consumerSlots = listConsumerSlots(consumerId);
   const slots = consumerSlots.map((consumerSlot) => cleanupOneSlot(consumerSlot.slotId));
   return { consumerId, slots };
+}
+
+function listCurrentConsumerRunIds(consumerId: string): string[] {
+  const runIds = new Set<string>();
+  for (const consumerSlot of listConsumerSlots(consumerId)) {
+    const inspection = inspectSlot(consumerSlot.slotId);
+    for (const run of inspection?.runs || []) {
+      if (run.status === 'ACTIVE' || run.status === 'PUSHED') {
+        runIds.add(run.runId);
+      }
+    }
+  }
+  return [...runIds].sort();
+}
+
+function safeReleaseReason(run: RunRow): string | null {
+  for (const worktree of listRunWorktrees(run.runId)) {
+    const repository = getRepository(run.nickname, worktree.repoName);
+    const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+    if (!repository || !poolWorktree) {
+      return `missing repository or pool metadata for ${worktree.repoName}`;
+    }
+    const safety = gitSafeToRelease(poolWorktree.poolPath, worktree.branchName, repository.defaultBranch);
+    if (!safety.safe) {
+      return `${worktree.repoName}: ${safety.reason}`;
+    }
+  }
+  return null;
+}
+
+export function cleanupConsumerRuns(consumerId: string, safe = false): CleanupConsumerRunsResult {
+  const released: CleanupConsumerRunsResult['released'] = [];
+  const skipped: CleanupConsumerRunsResult['skipped'] = [];
+
+  for (const runId of listCurrentConsumerRunIds(consumerId)) {
+    const run = getRun(runId);
+    if (!run) {
+      skipped.push({ runId, status: 'PURGED', reason: 'run disappeared before cleanup' });
+      continue;
+    }
+    if (safe) {
+      const reason = safeReleaseReason(run);
+      if (reason) {
+        skipped.push({ runId, status: run.status, reason });
+        recordRunEvent(run.runId, 'RUN_CLEANUP_CONSUMER_SKIPPED', `Skipped cleanup-consumer ${consumerId}: ${reason}`, { consumerId, safe }, 'WARN');
+        continue;
+      }
+    }
+
+    const result = releaseRunTree(run.runId, true);
+    recordRunEvent(run.runId, 'RUN_CLEANUP_CONSUMER_RELEASED', `Released by cleanup-consumer ${consumerId}`, { consumerId, safe });
+    released.push({ runId: result.run.runId, status: result.run.status, slots: result.slots });
+  }
+
+  return { consumerId, safe, released, skipped };
 }
 
 export function pushRunTree(runId: string): PushTreeResult {

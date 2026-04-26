@@ -242,6 +242,25 @@ export interface CleanupConsumerResult {
   slots: CleanupSlotResult[];
 }
 
+export interface CleanupConsumerRunResult {
+  runId: string;
+  status: RunStatus;
+  slots: ReleaseTreeSlotResult[];
+}
+
+export interface CleanupConsumerSkippedRun {
+  runId: string;
+  status: RunStatus;
+  reason: string;
+}
+
+export interface CleanupConsumerRunsResult {
+  consumerId: string;
+  safe: boolean;
+  released: CleanupConsumerRunResult[];
+  skipped: CleanupConsumerSkippedRun[];
+}
+
 export interface GcPoolWorktreeResult {
   poolWorktreeId: string;
   repoName: string;

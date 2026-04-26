@@ -23,6 +23,11 @@ function runGit(repoPath: string, args: string[]): string {
   return result.stdout;
 }
 
+function isAncestor(worktreePath: string, maybeAncestor: string, descendant: string): boolean {
+  const result = runGitRaw(worktreePath, ['merge-base', '--is-ancestor', maybeAncestor, descendant]);
+  return result.status === 0;
+}
+
 function tryGit(repoPath: string, args: string[]): string {
   const result = runGitRaw(repoPath, args);
   if (result.status !== 0) {
@@ -149,6 +154,39 @@ export function gitPushHeadToBranch(worktreePath: string, branchName: string): b
 export function gitBranchExistsOnRemote(worktreePath: string, branchName: string): boolean {
   const result = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', `origin/${branchName}`]);
   return result.status === 0;
+}
+
+export function gitSafeToRelease(worktreePath: string, branchName: string, defaultBranch: string): { safe: boolean; reason: string } {
+  if (gitHasUncommittedChanges(worktreePath)) {
+    return { safe: false, reason: 'worktree has uncommitted changes' };
+  }
+
+  const fetch = runGitRaw(worktreePath, ['fetch', 'origin']);
+  if (fetch.status !== 0) {
+    return { safe: false, reason: fetch.stderr || 'git fetch origin failed' };
+  }
+
+  const head = runGit(worktreePath, ['rev-parse', 'HEAD']);
+  const remoteBranch = `origin/${branchName}`;
+  const hasRemoteBranch = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', remoteBranch]);
+  if (hasRemoteBranch.status === 0) {
+    const remoteHead = runGit(worktreePath, ['rev-parse', remoteBranch]);
+    if (remoteHead === head || isAncestor(worktreePath, 'HEAD', remoteBranch)) {
+      return { safe: true, reason: `HEAD is contained in ${remoteBranch}` };
+    }
+    return { safe: false, reason: `HEAD is not contained in ${remoteBranch}` };
+  }
+
+  const remoteDefault = `origin/${defaultBranch}`;
+  const hasRemoteDefault = runGitRaw(worktreePath, ['rev-parse', '--verify', '--quiet', remoteDefault]);
+  if (hasRemoteDefault.status !== 0) {
+    return { safe: false, reason: `missing ${remoteBranch} and ${remoteDefault}` };
+  }
+  if (isAncestor(worktreePath, 'HEAD', remoteDefault)) {
+    return { safe: true, reason: `HEAD is contained in ${remoteDefault}` };
+  }
+
+  return { safe: false, reason: `HEAD is not contained in ${remoteBranch} or ${remoteDefault}` };
 }
 
 export function gitWorktreeRemove(repoPath: string, worktreePath: string): void {
