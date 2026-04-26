@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRunSlots, listRunWorktrees, listSlots, upsertProject, upsertRepository } from '../src/db.js';
-import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
+import { createRun, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRuns, listRunSlots, listRunWorktrees, listSlots, updateRunStatus, upsertProject, upsertRepository } from '../src/db.js';
+import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
 import { makeTempDir, removeTempDir, initGitRepo, writeFile } from './testUtils.js';
 
 let tempDir = '';
@@ -165,6 +165,57 @@ describe('runManager', () => {
     expect(listPoolWorktrees('henon')).toHaveLength(1);
     expect(listPoolWorktrees('henon')[0]?.state).toBe('FREE');
     expect(existsSync(created.run.workspaceRoot)).toBe(false);
+  });
+
+  it('purges only failed runs and leaves other runs alone', () => {
+    const baseDir = join(tempDir, 'runs');
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: repoPath,
+      remoteUrl: '',
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    const active = createNewTree('henon', []);
+    const failedRoot = join(baseDir, 'run-failed-manual');
+    mkdirSync(failedRoot, { recursive: true });
+    const failed = createRun({ runId: 'run-failed-manual', nickname: 'henon', workspaceRoot: failedRoot });
+    updateRunStatus(failed.runId, 'FAILED');
+
+    const purged = purgeFailedTrees('henon');
+
+    expect(purged.purgedRunIds).toEqual([failed.runId]);
+    expect(purged.skippedRunIds).toEqual([active.run.runId]);
+    expect(getRun(failed.runId)).toBeNull();
+    expect(getRun(active.run.runId)?.status).toBe('ACTIVE');
+    expect(existsSync(failedRoot)).toBe(false);
+    expect(existsSync(active.run.workspaceRoot)).toBe(true);
+  });
+
+  it('removes failed allocation run records before returning the error', () => {
+    const baseDir = join(tempDir, 'runs');
+    const repoPath = join(tempDir, 'missing-repo');
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: repoPath,
+      remoteUrl: '',
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    expect(() => createNewTree('henon', [])).toThrow();
+
+    expect(listRuns('henon')).toHaveLength(0);
+    expect(listPoolWorktrees('henon')).toHaveLength(0);
+    expect(listSlots('henon')).toHaveLength(0);
+    expect(purgeFailedTrees('henon').purgedRunIds).toEqual([]);
   });
 
   it('push-tree commits and pushes to the run branch without updating main', () => {

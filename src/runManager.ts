@@ -81,6 +81,15 @@ function recreateSymlink(linkPath: string, targetPath: string): void {
   symlinkSync(targetPath, linkPath, 'dir');
 }
 
+function removePoolWorktree(repository: RepositoryRow, poolWorktree: PoolWorktreeRow): void {
+  try {
+    gitWorktreeRemove(repository.localPath, poolWorktree.poolPath);
+  } catch {
+    rmSync(poolWorktree.poolPath, { recursive: true, force: true });
+  }
+  deletePoolWorktree(poolWorktree.poolWorktreeId);
+}
+
 function ensurePoolWorktreeForRepository(run: RunRow, repository: RepositoryRow, consumerId?: string): PoolWorktreeRow {
   const project = getProject(run.nickname);
   if (!project) {
@@ -103,7 +112,12 @@ function ensurePoolWorktreeForRepository(run: RunRow, repository: RepositoryRow,
   const poolPath = poolPathForProject(project.baseDir, repository.name, poolWorktreeId);
   rmSync(poolPath, { recursive: true, force: true });
   mkdirSync(join(project.baseDir, 'pool', repository.name), { recursive: true });
-  gitWorktreeAddDetached(repository.localPath, poolPath);
+  try {
+    gitWorktreeAddDetached(repository.localPath, poolPath);
+  } catch (error: unknown) {
+    rmSync(poolPath, { recursive: true, force: true });
+    throw error;
+  }
 
   return createPoolWorktree({
     poolWorktreeId,
@@ -118,42 +132,49 @@ function ensurePoolWorktreeForRepository(run: RunRow, repository: RepositoryRow,
 function createRunSlotForRepository(run: RunRow, repository: RepositoryRow, consumerId?: string): { slot: SlotRow; poolWorktree: PoolWorktreeRow; worktree: RunWorktreeRow } {
   const poolWorktree = ensurePoolWorktreeForRepository(run, repository, consumerId);
   const branchName = branchNameForRun(run.runId, repository.name);
-  gitPrepareWorktreeForRun(poolWorktree.poolPath, branchName, repository.defaultBranch);
-
   const slotId = createSlotId();
   const slotPath = slotPathForRun(run.workspaceRoot, repository.name);
-  mkdirSync(join(run.workspaceRoot, 'repos'), { recursive: true });
-  recreateSymlink(slotPath, poolWorktree.poolPath);
+  try {
+    gitPrepareWorktreeForRun(poolWorktree.poolPath, branchName, repository.defaultBranch);
+    mkdirSync(join(run.workspaceRoot, 'repos'), { recursive: true });
+    recreateSymlink(slotPath, poolWorktree.poolPath);
 
-  const slot = createSlot({
-    slotId,
-    nickname: run.nickname,
-    repoName: repository.name,
-    slotPath,
-    poolWorktreeId: poolWorktree.poolWorktreeId,
-    state: 'BUSY',
-    currentConsumerId: consumerId,
-  });
-  if (consumerId) {
-    assignConsumerSlot(consumerId, slot.slotId);
+    const slot = createSlot({
+      slotId,
+      nickname: run.nickname,
+      repoName: repository.name,
+      slotPath,
+      poolWorktreeId: poolWorktree.poolWorktreeId,
+      state: 'BUSY',
+      currentConsumerId: consumerId,
+    });
+    if (consumerId) {
+      assignConsumerSlot(consumerId, slot.slotId);
+    }
+    addRunSlot({
+      runId: run.runId,
+      slotId: slot.slotId,
+      repoName: repository.name,
+      poolWorktreeId: poolWorktree.poolWorktreeId,
+    });
+
+    const worktree = addRunWorktree({
+      runId: run.runId,
+      repoName: repository.name,
+      worktreePath: slot.slotPath,
+      branchName,
+      poolWorktreeId: poolWorktree.poolWorktreeId,
+      isPrimary: repository.isPrimary,
+    });
+
+    return { slot, poolWorktree, worktree };
+  } catch (error: unknown) {
+    rmSync(slotPath, { recursive: true, force: true });
+    clearConsumerSlot(slotId);
+    deleteSlot(slotId);
+    removePoolWorktree(repository, poolWorktree);
+    throw error;
   }
-  addRunSlot({
-    runId: run.runId,
-    slotId: slot.slotId,
-    repoName: repository.name,
-    poolWorktreeId: poolWorktree.poolWorktreeId,
-  });
-
-  const worktree = addRunWorktree({
-    runId: run.runId,
-    repoName: repository.name,
-    worktreePath: slot.slotPath,
-    branchName,
-    poolWorktreeId: poolWorktree.poolWorktreeId,
-    isPrimary: repository.isPrimary,
-  });
-
-  return { slot, poolWorktree, worktree };
 }
 
 function cleanupAssignedPool(repository: RepositoryRow, slot: SlotRow, poolWorktree: PoolWorktreeRow, branchName?: string): CleanupSlotResult {
@@ -237,6 +258,7 @@ export function createNewTree(nickname: string, selectedRepoNames: string[], con
   } catch (error: unknown) {
     updateRunStatus(run.runId, 'FAILED');
     recordRunEvent(run.runId, 'RUN_CREATE_FAILED', String(error instanceof Error ? error.message : error), undefined, 'ERROR');
+    purgeFailedRun(run);
     throw error;
   }
 }
@@ -411,6 +433,46 @@ export function purgeTrees(nickname?: string, force = false): { purgedRunIds: st
   return { purgedRunIds, skippedRunIds };
 }
 
+function purgeFailedRun(run: RunRow): void {
+  const runSlots = listRunSlots(run.runId);
+  for (const worktree of listRunWorktrees(run.runId)) {
+    const repository = getRepository(run.nickname, worktree.repoName);
+    const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+    const slot = getSlot(runSlots.find((entry) => entry.repoName === worktree.repoName)?.slotId || '');
+    if (repository && poolWorktree) {
+      removePoolWorktree(repository, poolWorktree);
+    } else if (poolWorktree) {
+      rmSync(poolWorktree.poolPath, { recursive: true, force: true });
+      deletePoolWorktree(poolWorktree.poolWorktreeId);
+    }
+    if (slot) {
+      clearConsumerSlot(slot.slotId);
+      deleteSlot(slot.slotId);
+    }
+  }
+  for (const runSlot of runSlots) {
+    deleteSlot(runSlot.slotId);
+  }
+  rmSync(run.workspaceRoot, { recursive: true, force: true });
+  deleteRun(run.runId);
+}
+
+export function purgeFailedTrees(nickname?: string): { purgedRunIds: string[]; skippedRunIds: string[] } {
+  const purgedRunIds: string[] = [];
+  const skippedRunIds: string[] = [];
+
+  for (const run of listRuns(nickname)) {
+    if (run.status !== 'FAILED') {
+      skippedRunIds.push(run.runId);
+      continue;
+    }
+    purgeFailedRun(run);
+    purgedRunIds.push(run.runId);
+  }
+
+  return { purgedRunIds, skippedRunIds };
+}
+
 export function gcPoolWorktrees(olderThanHours: number, nickname?: string): GcPoolResult {
   if (!Number.isFinite(olderThanHours) || olderThanHours < 0) {
     throw new Error(`olderThanHours must be a non-negative number: ${olderThanHours}`);
@@ -429,12 +491,7 @@ export function gcPoolWorktrees(olderThanHours: number, nickname?: string): GcPo
       continue;
     }
 
-    try {
-      gitWorktreeRemove(repository.localPath, poolWorktree.poolPath);
-    } catch {
-      rmSync(poolWorktree.poolPath, { recursive: true, force: true });
-    }
-    deletePoolWorktree(poolWorktree.poolWorktreeId);
+    removePoolWorktree(repository, poolWorktree);
     removed.push({
       poolWorktreeId: poolWorktree.poolWorktreeId,
       repoName: poolWorktree.repoName,

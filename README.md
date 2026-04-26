@@ -18,6 +18,7 @@ Current feature set:
 - promote extra repositories into a run as writable worktrees
 - push each run worktree to its own run branch
 - purge finished run workspaces
+- purge failed run workspaces
 - run a local end-to-end integration smoke test with `npm run integration-test`
 
 ## Install
@@ -71,6 +72,7 @@ node dist/cli.js search henon "kneading"
 node dist/cli.js new-tree henon --json
 node dist/cli.js promote run-... henon-pub02 --json
 node dist/cli.js push-tree run-... --json
+node dist/cli.js purge-failed henon --json
 ```
 
 ## Storage

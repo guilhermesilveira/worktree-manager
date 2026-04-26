@@ -7,7 +7,7 @@ import { Command } from 'commander';
 import { addRunEvent, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectRun, inspectSlot, listPoolWorktrees, listRepositories, listRunSummaries, listSlots, upsertProject, upsertRepository } from './db.js';
 import { assertGitRepo, detectDefaultBranch, detectRemoteUrl } from './git.js';
 import { resolveAbsolutePath, resolveDatabasePath } from './paths.js';
-import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
+import { cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
 import { searchAcrossRepos } from './search.js';
 
 function requiredText(value: string, label: string): string {
@@ -500,6 +500,21 @@ program
   .action((nicknameArg: string | undefined, options: { force?: boolean; json?: boolean }) => {
     const nickname = String(nicknameArg || '').trim() || undefined;
     const result = purgeTrees(nickname, options.force === true);
+    if (options.json) {
+      writeJson(result);
+      return;
+    }
+    process.stdout.write(`purged=${result.purgedRunIds.length} skipped=${result.skippedRunIds.length}\n`);
+  });
+
+program
+  .command('purge-failed')
+  .description('Remove failed run workspaces and unregister them from the local database')
+  .argument('[nickname]')
+  .option('--json', 'Emit JSON output')
+  .action((nicknameArg: string | undefined, options: { json?: boolean }) => {
+    const nickname = String(nicknameArg || '').trim() || undefined;
+    const result = purgeFailedTrees(nickname);
     if (options.json) {
       writeJson(result);
       return;
