@@ -3,8 +3,8 @@ import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { createRun, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRuns, listRunSlots, listRunWorktrees, listSlots, updateRunStatus, upsertProject, upsertRepository } from '../src/db.js';
-import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
+import { assignConsumerSlot, createRun, getRun, getRunWorktree, getSlot, listConsumerSlots, listPoolWorktrees, listRuns, listRunSlots, listRunWorktrees, listSlots, updateRunStatus, upsertProject, upsertRepository } from '../src/db.js';
+import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, gcPoolWorktreesKeepingFreePerRepo, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from '../src/runManager.js';
 import { makeTempDir, removeTempDir, initGitRepo, writeFile } from './testUtils.js';
 
 let tempDir = '';
@@ -158,6 +158,10 @@ describe('runManager', () => {
     const purgeBeforeForce = purgeTrees('henon', false);
     expect(purgeBeforeForce.skippedRunIds).toEqual([created.run.runId]);
 
+    const purgeForceKeep = purgeTrees('henon', true, [created.run.runId]);
+    expect(purgeForceKeep.skippedRunIds).toEqual([created.run.runId]);
+    expect(getRun(created.run.runId)?.status).toBe('ACTIVE');
+
     const purgeAfterForce = purgeTrees('henon', true);
     expect(purgeAfterForce.purgedRunIds).toEqual([created.run.runId]);
     expect(getRun(created.run.runId)).toBeNull();
@@ -165,6 +169,32 @@ describe('runManager', () => {
     expect(listPoolWorktrees('henon')).toHaveLength(1);
     expect(listPoolWorktrees('henon')[0]?.state).toBe('FREE');
     expect(existsSync(created.run.workspaceRoot)).toBe(false);
+  });
+
+  it('does not purge pushed runs unless forced', () => {
+    const baseDir = join(tempDir, 'runs');
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: repoPath,
+      remoteUrl: '',
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    const created = createNewTree('henon', []);
+    updateRunStatus(created.run.runId, 'PUSHED');
+
+    const purgeBeforeForce = purgeTrees('henon', false);
+    expect(purgeBeforeForce.skippedRunIds).toEqual([created.run.runId]);
+    expect(getRun(created.run.runId)?.status).toBe('PUSHED');
+
+    const purgeAfterForce = purgeTrees('henon', true);
+    expect(purgeAfterForce.purgedRunIds).toEqual([created.run.runId]);
+    expect(getRun(created.run.runId)).toBeNull();
   });
 
   it('purges only failed runs and leaves other runs alone', () => {
@@ -304,19 +334,74 @@ describe('runManager', () => {
     });
 
     const cleanRun = createNewTree('henon', [], 'agent-safe');
-    const dirtyRun = createNewTree('henon', [], 'agent-safe');
-    writeFile(join(dirtyRun.worktrees[0]!.worktreePath, 'temp.txt'), 'leftover\n');
-
     const cleaned = cleanupConsumerRuns('agent-safe', true);
 
     expect(cleaned.safe).toBe(true);
     expect(cleaned.released.map((entry) => entry.runId)).toEqual([cleanRun.run.runId]);
-    expect(cleaned.skipped).toHaveLength(1);
-    expect(cleaned.skipped[0]?.runId).toBe(dirtyRun.run.runId);
-    expect(cleaned.skipped[0]?.reason).toContain('uncommitted changes');
+    expect(cleaned.skipped).toHaveLength(0);
     expect(getRun(cleanRun.run.runId)?.status).toBe('RELEASED');
+
+    const dirtyRun = createNewTree('henon', [], 'agent-safe');
+    writeFile(join(dirtyRun.worktrees[0]!.worktreePath, 'temp.txt'), 'leftover\n');
+    const dirtyCleaned = cleanupConsumerRuns('agent-safe', true);
+
+    expect(dirtyCleaned.released).toHaveLength(0);
+    expect(dirtyCleaned.skipped).toHaveLength(1);
+    expect(dirtyCleaned.skipped[0]?.runId).toBe(dirtyRun.run.runId);
+    expect(dirtyCleaned.skipped[0]?.reason).toContain('uncommitted changes');
     expect(getRun(dirtyRun.run.runId)?.status).toBe('ACTIVE');
     expect(listConsumerSlots('agent-safe')).toHaveLength(1);
+  });
+
+  it('cleanup-consumer can keep a named current run', () => {
+    const baseDir = join(tempDir, 'runs');
+    const barePath = join(tempDir, 'origin.git');
+    const seedRepo = join(tempDir, 'seed');
+    initGitRepo(seedRepo, { 'README.md': '# henon\n' });
+    run('git', ['init', '--bare', barePath], tempDir);
+    run('git', ['remote', 'add', 'origin', barePath], seedRepo);
+    run('git', ['push', '-u', 'origin', 'main'], seedRepo);
+    run('git', ['remote', 'set-head', 'origin', 'main'], seedRepo);
+
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: seedRepo,
+      remoteUrl: barePath,
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    const oldRun = createNewTree('henon', [], 'agent-old');
+    const currentRun = createNewTree('henon', [], 'agent-keep');
+    assignConsumerSlot('agent-keep', listRunSlots(oldRun.run.runId)[0]!.slotId);
+
+    const cleaned = cleanupConsumerRuns('agent-keep', true, [currentRun.run.runId]);
+
+    expect(cleaned.released.map((entry) => entry.runId)).toEqual([oldRun.run.runId]);
+    expect(cleaned.skipped).toEqual([{ runId: currentRun.run.runId, status: 'ACTIVE', reason: 'kept by request' }]);
+    expect(getRun(oldRun.run.runId)?.status).toBe('RELEASED');
+    expect(getRun(currentRun.run.runId)?.status).toBe('ACTIVE');
+  });
+
+  it('rejects a second active run for the same consumer', () => {
+    const baseDir = join(tempDir, 'runs');
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: repoPath,
+      remoteUrl: '',
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    createNewTree('henon', [], 'agent-singleton');
+
+    expect(() => createNewTree('henon', [], 'agent-singleton')).toThrow(/already has active run/);
   });
 
   it('cleanup-slot marks a slot free when reset succeeds', () => {
@@ -367,5 +452,33 @@ describe('runManager', () => {
     expect(removed.skipped).toEqual([]);
     expect(listPoolWorktrees('henon')).toHaveLength(0);
     expect(existsSync(poolPath)).toBe(false);
+  });
+
+  it('gc-pool can keep a bounded number of free pooled worktrees per repo', () => {
+    const baseDir = join(tempDir, 'runs');
+    const repoPath = join(tempDir, 'henon');
+    initGitRepo(repoPath, { 'README.md': '# henon\n' });
+    upsertProject('henon', baseDir);
+    upsertRepository({
+      nickname: 'henon',
+      name: 'henon',
+      localPath: repoPath,
+      remoteUrl: '',
+      defaultBranch: 'main',
+      isPrimary: true,
+    });
+
+    const first = createNewTree('henon', [], 'agent-1');
+    const second = createNewTree('henon', [], 'agent-2');
+    const third = createNewTree('henon', [], 'agent-3');
+    releaseRunTree(first.run.runId, true);
+    releaseRunTree(second.run.runId, true);
+    releaseRunTree(third.run.runId, true);
+
+    const removed = gcPoolWorktreesKeepingFreePerRepo(2, 'henon');
+
+    expect(removed.removed).toHaveLength(1);
+    expect(removed.kept).toHaveLength(2);
+    expect(listPoolWorktrees('henon')).toHaveLength(2);
   });
 });

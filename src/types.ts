@@ -270,4 +270,5 @@ export interface GcPoolWorktreeResult {
 export interface GcPoolResult {
   removed: GcPoolWorktreeResult[];
   skipped: string[];
+  kept: GcPoolWorktreeResult[];
 }

@@ -234,6 +234,11 @@ export function createNewTree(nickname: string, selectedRepoNames: string[], con
   if (!project) {
     throw new Error(`Unknown nickname: ${nickname}`);
   }
+  const normalizedConsumerId = String(consumerId || '').trim();
+  const activeConsumerRunIds = normalizedConsumerId ? listCurrentConsumerRunIds(normalizedConsumerId) : [];
+  if (activeConsumerRunIds.length > 0) {
+    throw new Error(`Consumer ${normalizedConsumerId} already has active run(s): ${activeConsumerRunIds.join(', ')}`);
+  }
 
   const selectedRepositories = resolveSelectedRepositories(nickname, selectedRepoNames);
   mkdirSync(project.baseDir, { recursive: true });
@@ -248,9 +253,9 @@ export function createNewTree(nickname: string, selectedRepoNames: string[], con
   });
 
   try {
-    const worktrees = selectedRepositories.map((repository) => createRunSlotForRepository(run, repository, consumerId).worktree);
+    const worktrees = selectedRepositories.map((repository) => createRunSlotForRepository(run, repository, normalizedConsumerId || undefined).worktree);
     recordRunEvent(run.runId, 'RUN_CREATED', `Allocated ${worktrees.length} writable repo(s)`, {
-      consumerId: consumerId || null,
+      consumerId: normalizedConsumerId || null,
       repositories: worktrees.map((worktree) => ({ repoName: worktree.repoName, branchName: worktree.branchName, poolWorktreeId: worktree.poolWorktreeId })),
     });
     writeRunManifest(run, worktrees);
@@ -378,11 +383,17 @@ function safeReleaseReason(run: RunRow): string | null {
   return null;
 }
 
-export function cleanupConsumerRuns(consumerId: string, safe = false): CleanupConsumerRunsResult {
+export function cleanupConsumerRuns(consumerId: string, safe = false, keepRunIds: string[] = []): CleanupConsumerRunsResult {
   const released: CleanupConsumerRunsResult['released'] = [];
   const skipped: CleanupConsumerRunsResult['skipped'] = [];
+  const keepRunIdSet = new Set(keepRunIds.map((runId) => String(runId || '').trim()).filter(Boolean));
 
   for (const runId of listCurrentConsumerRunIds(consumerId)) {
+    if (keepRunIdSet.has(runId)) {
+      const run = getRun(runId);
+      skipped.push({ runId, status: run?.status || 'PURGED', reason: 'kept by request' });
+      continue;
+    }
     const run = getRun(runId);
     if (!run) {
       skipped.push({ runId, status: 'PURGED', reason: 'run disappeared before cleanup' });
@@ -464,28 +475,76 @@ export function pushRunTree(runId: string): PushTreeResult {
   }
 }
 
-export function purgeTrees(nickname?: string, force = false): { purgedRunIds: string[]; skippedRunIds: string[] } {
+export function purgeTrees(nickname?: string, force = false, keepRunIds: string[] = []): { purgedRunIds: string[]; skippedRunIds: string[] } {
   const runs = listRuns(nickname);
   const purgedRunIds: string[] = [];
   const skippedRunIds: string[] = [];
+  const keepRunIdSet = new Set(keepRunIds.map((runId) => String(runId || '').trim()).filter(Boolean));
 
   for (const run of runs) {
-    if (run.status === 'ACTIVE' && !force) {
+    if (keepRunIdSet.has(run.runId)) {
+      skippedRunIds.push(run.runId);
+      continue;
+    }
+    if ((run.status === 'ACTIVE' || run.status === 'PUSHED') && !force) {
       skippedRunIds.push(run.runId);
       continue;
     }
 
-    const runSlots = listRunSlots(run.runId);
-    releaseRunTree(run.runId, true);
-    for (const runSlot of runSlots) {
-      deleteSlot(runSlot.slotId);
-    }
-    rmSync(run.workspaceRoot, { recursive: true, force: true });
-    deleteRun(run.runId);
+    purgeRunRecord(run, force);
     purgedRunIds.push(run.runId);
   }
 
   return { purgedRunIds, skippedRunIds };
+}
+
+function purgeRunRecord(run: RunRow, force = false): void {
+  const runSlots = listRunSlots(run.runId);
+  if (run.status === 'ACTIVE' && !force) {
+    releaseRunTree(run.runId, true);
+  } else {
+    releaseInactiveRunSlotsBestEffort(run);
+  }
+  for (const runSlot of runSlots) {
+    deleteSlot(runSlot.slotId);
+  }
+  rmSync(run.workspaceRoot, { recursive: true, force: true });
+  deleteRun(run.runId);
+}
+
+function releaseInactiveRunSlotsBestEffort(run: RunRow): void {
+  const runSlots = listRunSlots(run.runId);
+  const handledSlotIds = new Set<string>();
+  const handledPoolWorktreeIds = new Set<string>();
+  for (const worktree of listRunWorktrees(run.runId)) {
+    const runSlot = runSlots.find((entry) => entry.repoName === worktree.repoName);
+    const slot = getSlot(runSlot?.slotId || '');
+    const poolWorktree = getPoolWorktree(worktree.poolWorktreeId);
+    if (slot) {
+      rmSync(slot.slotPath, { recursive: true, force: true });
+      clearConsumerSlot(slot.slotId);
+      updateSlotState(slot.slotId, 'FREE');
+      handledSlotIds.add(slot.slotId);
+    }
+    if (poolWorktree) {
+      clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+      updatePoolWorktreeState(poolWorktree.poolWorktreeId, 'FREE');
+      handledPoolWorktreeIds.add(poolWorktree.poolWorktreeId);
+    }
+  }
+  for (const runSlot of runSlots) {
+    const slot = getSlot(runSlot.slotId);
+    const poolWorktree = getPoolWorktree(runSlot.poolWorktreeId || slot?.poolWorktreeId || '');
+    if (slot && !handledSlotIds.has(slot.slotId)) {
+      rmSync(slot.slotPath, { recursive: true, force: true });
+      clearConsumerSlot(slot.slotId);
+      updateSlotState(slot.slotId, 'FREE');
+    }
+    if (poolWorktree && !handledPoolWorktreeIds.has(poolWorktree.poolWorktreeId)) {
+      clearPoolWorktreeConsumer(poolWorktree.poolWorktreeId);
+      updatePoolWorktreeState(poolWorktree.poolWorktreeId, 'FREE');
+    }
+  }
 }
 
 function purgeFailedRun(run: RunRow): void {
@@ -538,6 +597,7 @@ export function gcPoolWorktrees(olderThanHours: number, nickname?: string): GcPo
     : listStaleFreePoolWorktrees(olderThanIso(olderThanHours), nickname);
   const removed: GcPoolResult['removed'] = [];
   const skipped: string[] = [];
+  const kept: GcPoolResult['kept'] = [];
 
   for (const poolWorktree of poolsToRemove) {
     const repository = getRepository(poolWorktree.nickname, poolWorktree.repoName);
@@ -554,5 +614,50 @@ export function gcPoolWorktrees(olderThanHours: number, nickname?: string): GcPo
     });
   }
 
-  return { removed, skipped };
+  return { removed, skipped, kept };
+}
+
+export function gcPoolWorktreesKeepingFreePerRepo(keepFreePerRepo: number, nickname?: string): GcPoolResult {
+  if (!Number.isInteger(keepFreePerRepo) || keepFreePerRepo < 0) {
+    throw new Error(`keepFreePerRepo must be a non-negative integer: ${keepFreePerRepo}`);
+  }
+
+  const freePoolWorktreesByRepo = new Map<string, PoolWorktreeRow[]>();
+  for (const poolWorktree of listPoolWorktrees(nickname)) {
+    if (poolWorktree.state !== 'FREE') continue;
+    const key = `${poolWorktree.nickname}\0${poolWorktree.repoName}`;
+    const entries = freePoolWorktreesByRepo.get(key) || [];
+    entries.push(poolWorktree);
+    freePoolWorktreesByRepo.set(key, entries);
+  }
+
+  const removed: GcPoolResult['removed'] = [];
+  const skipped: string[] = [];
+  const kept: GcPoolResult['kept'] = [];
+
+  for (const poolWorktrees of freePoolWorktreesByRepo.values()) {
+    poolWorktrees.sort((a, b) => String(b.lastUsedAt).localeCompare(String(a.lastUsedAt)) || a.poolWorktreeId.localeCompare(b.poolWorktreeId));
+    for (const poolWorktree of poolWorktrees.slice(0, keepFreePerRepo)) {
+      kept.push({
+        poolWorktreeId: poolWorktree.poolWorktreeId,
+        repoName: poolWorktree.repoName,
+        poolPath: poolWorktree.poolPath,
+      });
+    }
+    for (const poolWorktree of poolWorktrees.slice(keepFreePerRepo)) {
+      const repository = getRepository(poolWorktree.nickname, poolWorktree.repoName);
+      if (!repository) {
+        skipped.push(poolWorktree.poolWorktreeId);
+        continue;
+      }
+      removePoolWorktree(repository, poolWorktree);
+      removed.push({
+        poolWorktreeId: poolWorktree.poolWorktreeId,
+        repoName: poolWorktree.repoName,
+        poolPath: poolWorktree.poolPath,
+      });
+    }
+  }
+
+  return { removed, skipped, kept };
 }

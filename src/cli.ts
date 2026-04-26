@@ -7,7 +7,7 @@ import { Command } from 'commander';
 import { addRunEvent, getPoolStats, getProject, getSlotStats, inspectPoolWorktree, inspectRun, inspectSlot, listPoolWorktrees, listRepositories, listRunSummaries, listSlots, upsertProject, upsertRepository } from './db.js';
 import { assertGitRepo, detectDefaultBranch, detectRemoteUrl } from './git.js';
 import { resolveAbsolutePath, resolveDatabasePath } from './paths.js';
-import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
+import { cleanupConsumerRuns, cleanupConsumerSlots, cleanupOneSlot, createNewTree, gcPoolWorktrees, gcPoolWorktreesKeepingFreePerRepo, promoteRunRepository, purgeFailedTrees, purgeTrees, pushRunTree, releaseRunTree } from './runManager.js';
 import { searchAcrossRepos } from './search.js';
 
 function requiredText(value: string, label: string): string {
@@ -462,16 +462,17 @@ program
   .argument('<consumerId>')
   .option('--safe', 'Only release runs whose worktrees are clean and already represented remotely')
   .option('--force', 'Release runs without remote safety checks')
+  .option('--keep-run <runIds...>', 'Skip these run ids while cleaning the consumer')
   .option('--slots-only', 'Legacy behavior: reset assigned slots directly without updating run lifecycle state')
   .option('--json', 'Emit JSON output')
-  .action((consumerIdArg: string, options: { safe?: boolean; force?: boolean; slotsOnly?: boolean; json?: boolean }) => {
+  .action((consumerIdArg: string, options: { safe?: boolean; force?: boolean; keepRun?: string[]; slotsOnly?: boolean; json?: boolean }) => {
     const consumerId = requiredText(consumerIdArg, 'consumerId');
     if (!options.slotsOnly && !options.safe && !options.force) {
       throw new Error('cleanup-consumer requires --safe or --force');
     }
     const result = options.slotsOnly
       ? cleanupConsumerSlots(consumerId)
-      : cleanupConsumerRuns(consumerId, options.safe === true);
+      : cleanupConsumerRuns(consumerId, options.safe === true, options.keepRun || []);
     if (options.json) {
       writeJson(result);
       return;
@@ -496,17 +497,25 @@ program
   .command('gc-pool')
   .description('Remove free pooled worktrees that have been unused longer than the requested threshold')
   .argument('[nickname]')
-  .requiredOption('--older-than-hours <hours>', 'Only remove free pooled worktrees unused longer than this many hours')
+  .option('--older-than-hours <hours>', 'Only remove free pooled worktrees unused longer than this many hours')
+  .option('--keep-free-per-repo <count>', 'Keep at most this many free pooled worktrees per repository, deleting older extras')
   .option('--json', 'Emit JSON output')
-  .action((nicknameArg: string | undefined, options: { olderThanHours: string; json?: boolean }) => {
+  .action((nicknameArg: string | undefined, options: { olderThanHours?: string; keepFreePerRepo?: string; json?: boolean }) => {
     const nickname = String(nicknameArg || '').trim() || undefined;
-    const olderThanHours = Number(options.olderThanHours);
-    const result = gcPoolWorktrees(olderThanHours, nickname);
+    if (options.olderThanHours !== undefined && options.keepFreePerRepo !== undefined) {
+      throw new Error('Use either --older-than-hours or --keep-free-per-repo, not both');
+    }
+    if (options.olderThanHours === undefined && options.keepFreePerRepo === undefined) {
+      throw new Error('gc-pool requires --older-than-hours or --keep-free-per-repo');
+    }
+    const result = options.keepFreePerRepo !== undefined
+      ? gcPoolWorktreesKeepingFreePerRepo(Number(options.keepFreePerRepo), nickname)
+      : gcPoolWorktrees(Number(options.olderThanHours), nickname);
     if (options.json) {
       writeJson(result);
       return;
     }
-    process.stdout.write(`removed=${result.removed.length} skipped=${result.skipped.length}\n`);
+    process.stdout.write(`removed=${result.removed.length} skipped=${result.skipped.length} kept=${result.kept.length}\n`);
   });
 
 program
@@ -514,10 +523,11 @@ program
   .description('Remove run workspaces and unregister them from the local database')
   .argument('[nickname]')
   .option('--force', 'Also purge active runs')
+  .option('--keep-run <runIds...>', 'Skip these run ids while purging')
   .option('--json', 'Emit JSON output')
-  .action((nicknameArg: string | undefined, options: { force?: boolean; json?: boolean }) => {
+  .action((nicknameArg: string | undefined, options: { force?: boolean; keepRun?: string[]; json?: boolean }) => {
     const nickname = String(nicknameArg || '').trim() || undefined;
-    const result = purgeTrees(nickname, options.force === true);
+    const result = purgeTrees(nickname, options.force === true, options.keepRun || []);
     if (options.json) {
       writeJson(result);
       return;
