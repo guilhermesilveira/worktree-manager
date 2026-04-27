@@ -30,6 +30,18 @@ function run(command: string, args: string[], cwd: string): void {
   }
 }
 
+function runOutput(command: string, args: string[], cwd: string): string {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if ((result.status ?? 1) !== 0) {
+    throw new Error(String(result.stderr || result.stdout || `${command} failed`));
+  }
+  return String(result.stdout || '').trim();
+}
+
 describe('runManager', () => {
   it('creates a new run with the primary repository worktree by default', () => {
     const baseDir = join(tempDir, 'runs');
@@ -53,6 +65,9 @@ describe('runManager', () => {
     expect(existsSync(join(result.run.workspaceRoot, 'run.json'))).toBe(true);
     expect(result.worktrees[0]!.worktreePath).toBe(join(result.run.workspaceRoot, 'repos', 'henon'));
     expect(lstatSync(result.worktrees[0]!.worktreePath).isSymbolicLink()).toBe(true);
+    expect(runOutput('git', ['config', '--get', 'extensions.worktreeConfig'], result.worktrees[0]!.worktreePath)).toBe('true');
+    expect(runOutput('git', ['config', '--worktree', '--get', 'push.default'], result.worktrees[0]!.worktreePath)).toBe('current');
+    expect(runOutput('git', ['config', '--show-origin', '--get', 'push.default'], result.worktrees[0]!.worktreePath)).toContain('config.worktree');
     expect(listRunSlots(result.run.runId)).toHaveLength(1);
     expect(listSlots('henon')).toHaveLength(1);
     expect(listPoolWorktrees('henon')).toHaveLength(1);
@@ -89,6 +104,7 @@ describe('runManager', () => {
     expect(listRunWorktrees(created.run.runId)).toHaveLength(2);
     expect(listRunSlots(created.run.runId)).toHaveLength(2);
     expect(existsSync(promoted.worktree.worktreePath)).toBe(true);
+    expect(runOutput('git', ['config', '--worktree', '--get', 'push.default'], promoted.worktree.worktreePath)).toBe('current');
   });
 
   it('records consumer-to-slot mappings when a consumer id is provided', () => {

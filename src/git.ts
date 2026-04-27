@@ -100,6 +100,8 @@ export function gitPrepareWorktreeForRun(worktreePath: string, branchName: strin
   runGit(worktreePath, ['reset', '--hard', targetRef]);
   runGit(worktreePath, ['clean', '-fdx']);
   runGit(worktreePath, ['checkout', '-B', branchName]);
+  runGit(worktreePath, ['config', 'extensions.worktreeConfig', 'true']);
+  runGit(worktreePath, ['config', '--worktree', 'push.default', 'current']);
 }
 
 export function gitResetWorktreeToDefault(worktreePath: string, defaultBranch: string): void {
